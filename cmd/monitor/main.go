@@ -5,15 +5,14 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/google/go-github/v57/github"
 	"golang.org/x/oauth2"
+	"github.com/claude-automation/pkg/kubernetes"
 )
 
 type IssueMonitor struct {
@@ -22,6 +21,7 @@ type IssueMonitor struct {
 	repo         string
 	pollInterval time.Duration
 	lastChecked  time.Time
+	podManager   *kubernetes.PodManager
 }
 
 type IssueRequest struct {
@@ -60,12 +60,29 @@ func NewIssueMonitor() (*IssueMonitor, error) {
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
+	// Initialize Kubernetes Pod Manager
+	namespace := os.Getenv("NAMESPACE")
+	if namespace == "" {
+		namespace = "claude-automation"
+	}
+	
+	podManager, err := kubernetes.NewPodManager(namespace, "/app/workspaces", "/app/sessions")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pod manager: %w", err)
+	}
+
+	// Setup ServiceAccount and RBAC
+	if err := podManager.SetupServiceAccount(ctx); err != nil {
+		log.Printf("Warning: Failed to setup ServiceAccount: %v", err)
+	}
+
 	return &IssueMonitor{
 		client:       client,
 		owner:        owner,
 		repo:         repo,
 		pollInterval: 30 * time.Second,
 		lastChecked:  time.Now(),
+		podManager:   podManager,
 	}, nil
 }
 
@@ -269,27 +286,87 @@ func (m *IssueMonitor) triggerOrchestrator(ctx context.Context, issueNumber int,
 }
 
 func (m *IssueMonitor) executeOrchestratorTask(ctx context.Context, issueNumber int, task string, repository string) {
-	// This simulates calling the orchestrator
-	// In reality, this would be an HTTP request or RPC call
+	// Create worker pod instead of Docker container
 	
-	cmd := exec.Command("go", "run", "./cmd/orchestrator/main.go", 
-		"-issue", strconv.Itoa(issueNumber), 
-		"-task", task,
-		"-repo", repository)
-	
-	output, err := cmd.CombinedOutput()
+	// Default configuration for Claude workers
+	config := &kubernetes.RepositoryConfig{
+		Image:     "worldscandy/claude-automation:latest",
+		Workspace: "/workspace",
+		Env: []string{
+			"CLAUDE_API_KEY=" + os.Getenv("CLAUDE_API_KEY"),
+			"GITHUB_TOKEN=" + os.Getenv("GITHUB_TOKEN"),
+		},
+		Commands: map[string]string{
+			"claude": "claude",
+		},
+	}
+
+	// Create worker pod
+	workerPod, err := m.podManager.CreateWorkerPod(ctx, issueNumber, repository, config)
 	if err != nil {
-		log.Printf("Orchestrator execution failed for issue #%d: %v\nOutput: %s", 
-			issueNumber, err, output)
+		log.Printf("Failed to create worker pod for issue #%d: %v", issueNumber, err)
 		
 		// Post error to issue
-		errorBody := fmt.Sprintf("❌ **処理中にエラーが発生しました**\n\n```\n%s\n```", err.Error())
+		errorBody := fmt.Sprintf("❌ **Kubernetes Pod作成に失敗しました**\n\n```\n%s\n```", err.Error())
 		comment := &github.IssueComment{Body: &errorBody}
 		m.client.Issues.CreateComment(ctx, m.owner, m.repo, issueNumber, comment)
 		return
 	}
+
+	log.Printf("Created worker pod %s for issue #%d", workerPod.PodName, issueNumber)
+
+	// Post progress update to issue
+	progressBody := fmt.Sprintf("🚀 **タスク処理を開始しました**\n\nIssue #%d の処理を Kubernetes Pod `%s` で実行中です...", 
+		issueNumber, workerPod.PodName)
+	comment := &github.IssueComment{Body: &progressBody}
+	m.client.Issues.CreateComment(ctx, m.owner, m.repo, issueNumber, comment)
+
+	// Wait for pod to be ready
+	if err := m.podManager.WaitForPodReady(ctx, workerPod.PodName, 5*time.Minute); err != nil {
+		log.Printf("Pod %s failed to become ready: %v", workerPod.PodName, err)
+		
+		// Get pod logs for debugging
+		logs, _ := m.podManager.GetPodLogs(ctx, workerPod.PodName)
+		
+		errorBody := fmt.Sprintf("❌ **Pod起動に失敗しました**\n\n```\n%s\n```\n\n**Pod Logs:**\n```\n%s\n```", 
+			err.Error(), logs)
+		comment := &github.IssueComment{Body: &errorBody}
+		m.client.Issues.CreateComment(ctx, m.owner, m.repo, issueNumber, comment)
+		
+		// Cleanup failed pod
+		m.podManager.DeleteWorkerPod(ctx, workerPod.PodName)
+		return
+	}
+
+	log.Printf("Pod %s is ready, executing Claude CLI task", workerPod.PodName)
+
+	// Execute Claude CLI task in the pod
+	claudeCommand := fmt.Sprintf("claude --print --max-turns 10 --verbose '%s'", task)
+	output, err := m.podManager.ExecuteInPod(ctx, workerPod.PodName, claudeCommand)
 	
-	log.Printf("Orchestrator completed task for issue #%d (repository: %s)", issueNumber, repository)
+	if err != nil {
+		log.Printf("Claude CLI execution failed in pod %s: %v", workerPod.PodName, err)
+		
+		// Get pod logs for debugging
+		logs, _ := m.podManager.GetPodLogs(ctx, workerPod.PodName)
+		
+		errorBody := fmt.Sprintf("❌ **Claude CLI実行に失敗しました**\n\n```\n%s\n```\n\n**Pod Logs:**\n```\n%s\n```", 
+			err.Error(), logs)
+		comment := &github.IssueComment{Body: &errorBody}
+		m.client.Issues.CreateComment(ctx, m.owner, m.repo, issueNumber, comment)
+	} else {
+		// Post successful result
+		resultBody := fmt.Sprintf("✅ **タスクが完了しました**\n\n**実行結果:**\n```\n%s\n```", output)
+		comment := &github.IssueComment{Body: &resultBody}
+		m.client.Issues.CreateComment(ctx, m.owner, m.repo, issueNumber, comment)
+		
+		log.Printf("Task completed successfully for issue #%d", issueNumber)
+	}
+
+	// Cleanup: Delete the worker pod after task completion
+	if err := m.podManager.DeleteWorkerPod(ctx, workerPod.PodName); err != nil {
+		log.Printf("Warning: Failed to cleanup pod %s: %v", workerPod.PodName, err)
+	}
 }
 
 func main() {
