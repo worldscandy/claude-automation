@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v2"
+	
+	"github.com/claude-automation/pkg/auth"
 )
 
 // ContainerManager manages worker containers for different repositories
@@ -230,21 +232,17 @@ func (cm *ContainerManager) buildDockerCommand(containerID string, config *Repos
 	// Mount workspace directory (use absolute paths for Docker-in-Docker)
 	cmd = append(cmd, "-v", fmt.Sprintf("%s:%s", workspaceDir, config.Workspace))
 
-	// Mount Claude CLI auth files from project auth directory
-	projectAuthDir := "./auth"
-	if _, err := os.Stat(projectAuthDir); err == nil {
-		// Mount entire auth directory to /app/auth for visibility
-		cmd = append(cmd, "-v", fmt.Sprintf("%s:/app/auth:ro", projectAuthDir))
-		
-		// Mount auth directory to claude home for direct access (read-write for Claude CLI operation)
-		cmd = append(cmd, "-v", fmt.Sprintf("%s:/home/claude/.claude", projectAuthDir))
-		
-		log.Printf("Mounting auth directory: %s -> /home/claude/.claude", projectAuthDir)
-	} else {
-		log.Printf("Warning: Project auth directory not found: %s", projectAuthDir)
-		
+	// Generate and mount Claude CLI auth files from templates and environment variables
+	tempAuthDir := "/tmp/claude-auth-temp"
+	if err := cm.generateContainerAuthFiles(tempAuthDir); err != nil {
+		log.Printf("Warning: failed to generate auth files, using fallback: %v", err)
 		// Fallback: mount empty directory for safety
 		cmd = append(cmd, "-v", "/tmp/empty:/app/auth:ro")
+	} else {
+		// Mount generated auth directory to claude home for direct access
+		cmd = append(cmd, "-v", fmt.Sprintf("%s:/home/claude/.claude", tempAuthDir))
+		
+		log.Printf("Mounting generated auth directory: %s -> /home/claude/.claude", tempAuthDir)
 	}
 
 	// Add environment variables
@@ -337,4 +335,46 @@ func (cm *ContainerManager) GetContainerLogs(ctx context.Context, containerID st
 		return "", fmt.Errorf("failed to get container logs: %w", err)
 	}
 	return string(output), nil
+}
+
+// generateContainerAuthFiles generates Claude CLI auth files for container use
+func (cm *ContainerManager) generateContainerAuthFiles(destDir string) error {
+	// Load environment variables from .env-secret file
+	if err := auth.LoadEnvFile(".env-secret"); err != nil {
+		log.Printf("Warning: failed to load .env-secret file: %v", err)
+	}
+
+	// Check token expiry and generate alert if needed
+	if alert, err := auth.GetTokenExpiryAlert(); err == nil && alert != "" {
+		log.Printf("Token Alert: %s", alert)
+	}
+
+	// Generate auth files from templates and environment variables
+	return auth.GenerateAuthFiles(destDir)
+}
+
+// RefreshContainerAuth refreshes authentication files for an existing container
+func (cm *ContainerManager) RefreshContainerAuth(ctx context.Context, containerID string) error {
+	tempAuthDir := "/tmp/claude-auth-refresh"
+	
+	// Generate new auth files
+	if err := cm.generateContainerAuthFiles(tempAuthDir); err != nil {
+		return fmt.Errorf("failed to generate auth files: %w", err)
+	}
+	
+	// Copy new auth files into the running container
+	copyCmd := fmt.Sprintf("docker cp %s/. %s:/home/claude/.claude/", tempAuthDir, containerID)
+	cmd := exec.CommandContext(ctx, "sh", "-c", copyCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to copy auth files to container: %w", err)
+	}
+	
+	// Fix permissions inside container
+	permCmd := "sudo chown -R claude:claude /home/claude/.claude && sudo chmod -R u+w /home/claude/.claude"
+	if _, err := cm.ExecuteInContainer(ctx, containerID, permCmd); err != nil {
+		log.Printf("Warning: failed to fix auth permissions in container: %v", err)
+	}
+	
+	log.Printf("Successfully refreshed auth files for container: %s", containerID)
+	return nil
 }
