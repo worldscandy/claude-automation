@@ -1,0 +1,15 @@
+{
+  "firstStartTime": "TEMPLATE_FIRST_START_TIME",
+  "userID": "TEMPLATE_USER_ID",
+  "oauthAccount": {
+    "accountUuid": "TEMPLATE_ACCOUNT_UUID",
+    "emailAddress": "TEMPLATE_EMAIL",
+    "organizationUuid": "TEMPLATE_ORG_UUID",
+    "organizationRole": "TEMPLATE_ORG_ROLE",
+    "workspaceRole": null,
+    "organizationName": "TEMPLATE_ORG_NAME"
+  },
+  "claudeMaxTier": "TEMPLATE_MAX_TIER",
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "1.0.3"
+}

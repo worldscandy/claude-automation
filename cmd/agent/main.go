@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -23,49 +23,53 @@ type AgentResponse struct {
 }
 
 type Agent struct {
-	issueID    string
-	socketPath string
+	issueID string
+	port    string
 }
 
 func NewAgent() *Agent {
 	return &Agent{
-		issueID:    os.Getenv("ISSUE_ID"),
-		socketPath: os.Getenv("SOCKET_PATH"),
+		issueID: os.Getenv("ISSUE_ID"),
+		port:    getEnvOrDefault("AGENT_PORT", "8080"),
 	}
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 func (a *Agent) Start() error {
-	// Remove existing socket if it exists
-	os.Remove(a.socketPath)
-
-	// Create Unix socket
-	listener, err := net.Listen("unix", a.socketPath)
-	if err != nil {
-		return fmt.Errorf("failed to create socket: %w", err)
-	}
-	defer listener.Close()
-
-	log.Printf("Agent started for issue %s, listening on %s", a.issueID, a.socketPath)
-
-	// Accept connections
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept connection: %v", err)
-			continue
-		}
-
-		go a.handleConnection(conn)
-	}
+	http.HandleFunc("/health", a.healthHandler)
+	http.HandleFunc("/exec", a.execHandler)
+	
+	addr := fmt.Sprintf(":%s", a.port)
+	log.Printf("Agent started for issue %s, listening on %s", a.issueID, addr)
+	
+	return http.ListenAndServe(addr, nil)
 }
 
-func (a *Agent) handleConnection(conn net.Conn) {
-	defer conn.Close()
+func (a *Agent) healthHandler(w http.ResponseWriter, r *http.Request) {
+	response := map[string]string{
+		"status":   "healthy",
+		"issue_id": a.issueID,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
 
-	// Read message
+func (a *Agent) execHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var msg AgentMessage
-	if err := json.NewDecoder(conn).Decode(&msg); err != nil {
-		log.Printf("Failed to decode message: %v", err)
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
@@ -75,35 +79,28 @@ func (a *Agent) handleConnection(conn net.Conn) {
 			Success: false,
 			Error:   fmt.Sprintf("Issue ID mismatch: expected %s, got %s", a.issueID, msg.IssueID),
 		}
-		json.NewEncoder(conn).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	// Handle command
-	switch msg.Type {
-	case "exec":
-		a.handleExec(conn, msg.Command)
-	default:
-		resp := AgentResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Unknown message type: %s", msg.Type),
-		}
-		json.NewEncoder(conn).Encode(resp)
-	}
+	// Execute command
+	resp := a.executeCommand(msg.Command)
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
-func (a *Agent) handleExec(conn net.Conn, command string) {
+func (a *Agent) executeCommand(command string) AgentResponse {
 	log.Printf("Executing command: %s", command)
 
 	// Split command into parts
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
-		resp := AgentResponse{
+		return AgentResponse{
 			Success: false,
 			Error:   "Empty command",
 		}
-		json.NewEncoder(conn).Encode(resp)
-		return
 	}
 
 	// Execute command
@@ -120,10 +117,7 @@ func (a *Agent) handleExec(conn net.Conn, command string) {
 		resp.Error = err.Error()
 	}
 
-	// Send response
-	if err := json.NewEncoder(conn).Encode(resp); err != nil {
-		log.Printf("Failed to send response: %v", err)
-	}
+	return resp
 }
 
 func main() {
@@ -132,11 +126,9 @@ func main() {
 	if agent.issueID == "" {
 		log.Fatal("ISSUE_ID environment variable not set")
 	}
-	
-	if agent.socketPath == "" {
-		agent.socketPath = "/tmp/claude-agent.sock"
-	}
 
+	log.Printf("Starting agent for issue: %s", agent.issueID)
+	
 	if err := agent.Start(); err != nil {
 		log.Fatal("Failed to start agent:", err)
 	}

@@ -1,0 +1,47 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Authentication files
+auth/
+*.credentials.json
+claude-auth-minimal.json
+claude-original.json
+.claude.json
+!.claude.json.template
+!.claude.credentials.json.template
+
+# Test files
+test-workspace/
+test-claude-*/
+*.log
+
+# Binary outputs
+bin/
+cmd/agent/agent
+
+# Temporary files
+*.tmp
+*.bak
+shared/workspaces/

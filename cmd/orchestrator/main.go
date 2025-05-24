@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,11 +21,15 @@ import (
 )
 
 type Orchestrator struct {
-	dockerClient    *client.Client
-	socketPath      string
-	workspaceRoot   string
-	activeContainers sync.Map // issue_id -> container_id
-	mu              sync.Mutex
+	dockerClient     *client.Client
+	workspaceRoot    string
+	activeContainers sync.Map // issue_id -> ContainerInfo
+	mu               sync.Mutex
+}
+
+type ContainerInfo struct {
+	ID   string
+	Port int
 }
 
 type AgentMessage struct {
@@ -49,7 +55,6 @@ func NewOrchestrator() (*Orchestrator, error) {
 
 	return &Orchestrator{
 		dockerClient:  cli,
-		socketPath:    "/tmp/claude-agent.sock",
 		workspaceRoot: workspaceRoot,
 	}, nil
 }
@@ -63,6 +68,9 @@ func (o *Orchestrator) StartContainer(ctx context.Context, issueID string, image
 		return "", fmt.Errorf("failed to create workspace: %w", err)
 	}
 
+	// Get available port
+	port := o.getAvailablePort()
+	
 	// Get absolute paths
 	absWorkDir, _ := filepath.Abs(workDir)
 	absAgentPath, _ := filepath.Abs("./cmd/agent/agent")
@@ -72,10 +80,13 @@ func (o *Orchestrator) StartContainer(ctx context.Context, issueID string, image
 		Image: image,
 		Env: []string{
 			fmt.Sprintf("ISSUE_ID=%s", issueID),
-			"SOCKET_PATH=/tmp/claude-agent.sock",
+			fmt.Sprintf("AGENT_PORT=%d", port),
 		},
 		Cmd: []string{"/agent"},
 		WorkingDir: "/workspace",
+		ExposedPorts: map[string]struct{}{
+			fmt.Sprintf("%d/tcp", port): {},
+		},
 	}
 
 	// Host configuration with mounts
@@ -92,10 +103,10 @@ func (o *Orchestrator) StartContainer(ctx context.Context, issueID string, image
 				Target: "/agent",
 				ReadOnly: true,
 			},
-			{
-				Type:   mount.TypeBind,
-				Source: o.socketPath,
-				Target: "/tmp/claude-agent.sock",
+		},
+		PortBindings: map[string][]container.PortBinding{
+			fmt.Sprintf("%d/tcp", port): {
+				{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)},
 			},
 		},
 		AutoRemove: true,
@@ -112,11 +123,40 @@ func (o *Orchestrator) StartContainer(ctx context.Context, issueID string, image
 		return "", fmt.Errorf("failed to start container: %w", err)
 	}
 
-	// Store container ID
-	o.activeContainers.Store(issueID, resp.ID)
+	// Store container info
+	containerInfo := ContainerInfo{
+		ID:   resp.ID,
+		Port: port,
+	}
+	o.activeContainers.Store(issueID, containerInfo)
 	
-	log.Printf("Started container %s for issue %s", resp.ID[:12], issueID)
+	log.Printf("Started container %s for issue %s on port %d", resp.ID[:12], issueID, port)
 	return resp.ID, nil
+}
+
+func (o *Orchestrator) getAvailablePort() int {
+	// Simple port allocation starting from 8080
+	// In production, this should be more sophisticated
+	basePort := 8080
+	for i := 0; i < 100; i++ {
+		port := basePort + i
+		if o.isPortAvailable(port) {
+			return port
+		}
+	}
+	return basePort // fallback
+}
+
+func (o *Orchestrator) isPortAvailable(port int) bool {
+	// Check if port is already used by existing containers
+	o.activeContainers.Range(func(key, value interface{}) bool {
+		containerInfo := value.(ContainerInfo)
+		if containerInfo.Port == port {
+			return false // port is used
+		}
+		return true
+	})
+	return true
 }
 
 func (o *Orchestrator) ExecuteClaudeCommand(ctx context.Context, issueID, instruction string) (string, error) {
@@ -168,8 +208,16 @@ EXEC: python script.py`, workDir, containerID.(string)[:12])
 }
 
 func (o *Orchestrator) ExecuteInContainer(ctx context.Context, issueID, command string) (string, error) {
-	// Connect to agent socket
-	conn, err := net.Dial("unix", o.socketPath)
+	// Get container info
+	containerInfoVal, ok := o.activeContainers.Load(issueID)
+	if !ok {
+		return "", fmt.Errorf("no container for issue %s", issueID)
+	}
+	containerInfo := containerInfoVal.(ContainerInfo)
+	
+	// Connect to agent socket in container's namespace
+	socketPath := fmt.Sprintf("/tmp/claude-agent-%s.sock", issueID)
+	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to agent: %w", err)
 	}
