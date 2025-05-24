@@ -113,16 +113,27 @@ repositories:
       test: "kubectl validate -f ."
       build: "kubectl diff -f ."
 
-# Default fallback configuration
+  # Claude Automation System (this repository)
+  worldscandy/claude-automation:
+    image: "claude-automation-claude"
+    workspace: "/home/claude/workspace"
+    env:
+      - NODE_ENV=development
+    commands:
+      setup: "npm --version && claude --version"
+      test: "claude --help"
+      build: "echo 'Claude CLI ready'"
+
+# Default fallback configuration - Claude CLI enabled
 default:
-  image: "ubuntu:22.04"
-  workspace: "/workspace"
+  image: "claude-automation-claude"
+  workspace: "/home/claude/workspace"
   env:
-    - DEBIAN_FRONTEND=noninteractive
+    - NODE_ENV=development
   commands:
-    setup: "apt-get update && apt-get install -y build-essential git"
-    test: "echo 'No specific test command'"
-    build: "echo 'No specific build command'"
+    setup: "npm --version && claude --version"
+    test: "claude --help"
+    build: "echo 'Claude CLI ready'"
 
 # Container resource limits
 resource_limits:

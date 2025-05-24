@@ -116,12 +116,24 @@ func (cm *ContainerManager) CreateWorkerContainer(ctx context.Context, issueNumb
 	// Get repository configuration
 	config := cm.getRepositoryConfig(repository)
 	
-	// Create workspace directory
+	// Ensure workspace parent directory exists (Host side)
+	if err := os.MkdirAll(cm.WorkspacesDir, 0755); err != nil {
+		log.Printf("Warning: failed to create workspaces root: %v", err)
+	}
+	
+	// Create workspace directory for this issue  
 	workspaceDir := filepath.Join(cm.WorkspacesDir, fmt.Sprintf("issue-%d", issueNumber))
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create workspace directory: %w", err)
+		log.Printf("Warning: failed to create issue workspace (will use container internal): %v", err)
+		// Use container internal path if host creation fails
+		workspaceDir = fmt.Sprintf("/app/workspaces/issue-%d", issueNumber)
 	}
 
+	// Ensure sessions directory exists (Host side)
+	if err := os.MkdirAll(cm.SessionsDir, 0755); err != nil {
+		log.Printf("Warning: failed to create sessions directory: %v", err)
+	}
+	
 	// Create session file path
 	sessionFile := filepath.Join(cm.SessionsDir, fmt.Sprintf("issue-%d.session", issueNumber))
 
@@ -135,6 +147,18 @@ func (cm *ContainerManager) CreateWorkerContainer(ctx context.Context, issueNumb
 	cmd := exec.CommandContext(ctx, dockerCmd[0], dockerCmd[1:]...)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to create container: %w", err)
+	}
+	
+	// Create issue-specific workspace inside container and fix permissions
+	issueWorkspaceCmd := fmt.Sprintf("mkdir -p /app/workspaces/issue-%d && mkdir -p /app/sessions", issueNumber)
+	if _, err := cm.ExecuteInContainer(ctx, containerID, issueWorkspaceCmd); err != nil {
+		log.Printf("Warning: failed to create container workspace: %v", err)
+	}
+	
+	// Fix workspace permissions (as root, then switch back)
+	fixPermCmd := "sudo chown -R claude:claude /home/claude/workspace || chown -R claude:claude /home/claude/workspace || echo 'Permission fix failed, continuing...'"
+	if _, err := cm.ExecuteInContainer(ctx, containerID, fixPermCmd); err != nil {
+		log.Printf("Warning: failed to fix workspace permissions: %v", err)
 	}
 
 	// Create worker container object
@@ -206,9 +230,22 @@ func (cm *ContainerManager) buildDockerCommand(containerID string, config *Repos
 	// Mount workspace directory (use absolute paths for Docker-in-Docker)
 	cmd = append(cmd, "-v", fmt.Sprintf("%s:%s", workspaceDir, config.Workspace))
 
-	// Mount Claude CLI auth (read-only) - use absolute path
-	authDir := "/app/auth"
-	cmd = append(cmd, "-v", fmt.Sprintf("%s:/app/auth:ro", authDir))
+	// Mount Claude CLI auth files from project auth directory
+	projectAuthDir := "./auth"
+	if _, err := os.Stat(projectAuthDir); err == nil {
+		// Mount entire auth directory to /app/auth for visibility
+		cmd = append(cmd, "-v", fmt.Sprintf("%s:/app/auth:ro", projectAuthDir))
+		
+		// Mount auth directory to claude home for direct access (read-write for Claude CLI operation)
+		cmd = append(cmd, "-v", fmt.Sprintf("%s:/home/claude/.claude", projectAuthDir))
+		
+		log.Printf("Mounting auth directory: %s -> /home/claude/.claude", projectAuthDir)
+	} else {
+		log.Printf("Warning: Project auth directory not found: %s", projectAuthDir)
+		
+		// Fallback: mount empty directory for safety
+		cmd = append(cmd, "-v", "/tmp/empty:/app/auth:ro")
+	}
 
 	// Add environment variables
 	for _, env := range config.Env {
