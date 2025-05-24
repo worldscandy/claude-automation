@@ -7,6 +7,9 @@ GitHub Issueで@claudeメンションを検知し、自動的にDockerコンテ�
 - URL: https://github.com/worldscandy/claude-automation
 - 初期実装完了済み
 
+## claude codeへのお願い
+- 回答は日本語でお願いします。
+
 ## ✅ 完了したタスク
 
 ### 1. **基本アーキテクチャの実装**
