@@ -208,8 +208,9 @@ func (o *Orchestrator) executeOnHost(ctx context.Context, execution *TaskExecuti
 	// Build comprehensive task context
 	taskContext := o.buildTaskContext(execution)
 	
-	// Execute Claude CLI
-	cmd := exec.Command("claude", args...)
+	// Execute Claude CLI with bash wrapper for compatibility
+	claudeCmd := append([]string{"bash", "/usr/local/bin/claude"}, args...)
+	cmd := exec.Command(claudeCmd[0], claudeCmd[1:]...)
 	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(taskContext)
 	

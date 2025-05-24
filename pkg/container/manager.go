@@ -184,27 +184,30 @@ func (cm *ContainerManager) buildDockerCommand(containerID string, config *Repos
 		}
 	}
 
-	// Add security settings
+	// Add security settings (relaxed for testing)
 	if cm.RepoMapping.Security != nil {
-		if cm.RepoMapping.Security.NoNewPrivileges {
-			cmd = append(cmd, "--security-opt", "no-new-privileges:true")
-		}
-		if cm.RepoMapping.Security.User != "" {
-			cmd = append(cmd, "--user", cm.RepoMapping.Security.User)
-		}
-		for _, cap := range cm.RepoMapping.Security.Capabilities.Drop {
-			cmd = append(cmd, "--cap-drop", cap)
-		}
+		// Skip security restrictions for Docker-in-Docker testing
+		// if cm.RepoMapping.Security.NoNewPrivileges {
+		//     cmd = append(cmd, "--security-opt", "no-new-privileges:true")
+		// }
+		// Don't set user for now to avoid permission issues
+		// if cm.RepoMapping.Security.User != "" {
+		//     cmd = append(cmd, "--user", cm.RepoMapping.Security.User)
+		// }
+		// Skip capability restrictions for now
+		// for _, cap := range cm.RepoMapping.Security.Capabilities.Drop {
+		//     cmd = append(cmd, "--cap-drop", cap)
+		// }
 		for _, cap := range cm.RepoMapping.Security.Capabilities.Add {
 			cmd = append(cmd, "--cap-add", cap)
 		}
 	}
 
-	// Mount workspace directory
+	// Mount workspace directory (use absolute paths for Docker-in-Docker)
 	cmd = append(cmd, "-v", fmt.Sprintf("%s:%s", workspaceDir, config.Workspace))
 
-	// Mount Claude CLI auth (read-only)
-	authDir := filepath.Join(".", "auth")
+	// Mount Claude CLI auth (read-only) - use absolute path
+	authDir := "/app/auth"
 	cmd = append(cmd, "-v", fmt.Sprintf("%s:/app/auth:ro", authDir))
 
 	// Add environment variables

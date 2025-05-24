@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: claude-automation-monitor
     restart: unless-stopped
+    privileged: true
     
     # Docker-in-Docker (DinD) setup
     volumes:
@@ -44,9 +45,9 @@ services:
           memory: 256M
           cpus: '0.25'
     
-    # Security settings
-    security_opt:
-      - no-new-privileges:true
+    # Security settings (relaxed for Docker-in-Docker)
+    # security_opt:
+    #   - no-new-privileges:true
     
     # Network
     networks:

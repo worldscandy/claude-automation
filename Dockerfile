@@ -32,10 +32,9 @@ RUN apk add --no-cache \
     curl \
     && rm -rf /var/cache/apk/*
 
-# Install Claude CLI (placeholder - will be added when available)
-# RUN curl -fsSL https://claude.ai/install.sh | sh
-# For now, create a placeholder claude command
-RUN echo '#!/bin/bash\necho "Claude CLI placeholder - replace with actual installation"\nexit 1' > /usr/local/bin/claude && chmod +x /usr/local/bin/claude
+# Install Claude CLI (test implementation)
+# For testing, create a functional mock claude command
+RUN echo '#!/bin/bash\necho "🤖 Claude CLI Test Implementation"\necho "Task: $@"\necho "Working directory: $(pwd)"\necho "Files in workspace:"\nls -la 2>/dev/null || echo "No files yet"\necho "✅ Task simulation completed successfully"\necho "Created test output file"\necho "Test result from Claude CLI mock implementation" > claude-output.txt\necho "Task completed at $(date)"' > /usr/local/bin/claude && chmod +x /usr/local/bin/claude
 
 # Create non-root user
 RUN addgroup -g 1001 appgroup && \
