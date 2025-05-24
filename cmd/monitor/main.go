@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,8 +156,8 @@ func (m *IssueMonitor) checkIssueComments(ctx context.Context, issue *github.Iss
 }
 
 func (m *IssueMonitor) hasClauldeMention(text string) bool {
-	// Check for @claude mention (case insensitive)
-	mentionRegex := regexp.MustCompile(`(?i)@claude\b`)
+	// Check for @claude mention (case insensitive, not in email addresses)
+	mentionRegex := regexp.MustCompile(`(?i)(?:^|[^a-zA-Z0-9.])@claude\b`)
 	return mentionRegex.MatchString(text)
 }
 
@@ -166,9 +168,8 @@ func (m *IssueMonitor) handleIssue(ctx context.Context, issue *github.Issue) {
 	log.Printf("Processing task from issue #%d", *issue.Number)
 	log.Printf("Task: %s", task)
 
-	// TODO: Start container and execute task
-	// For now, just acknowledge
-	m.acknowledgeTask(ctx, issue, "issue")
+	// Trigger orchestrator to handle the task
+	m.triggerOrchestrator(ctx, *issue.Number, task)
 }
 
 func (m *IssueMonitor) handleIssueComment(ctx context.Context, issue *github.Issue, comment *github.IssueComment) {
@@ -178,9 +179,8 @@ func (m *IssueMonitor) handleIssueComment(ctx context.Context, issue *github.Iss
 	log.Printf("Processing task from comment on issue #%d", *issue.Number)
 	log.Printf("Task: %s", task)
 
-	// TODO: Start container and execute task
-	// For now, just acknowledge
-	m.acknowledgeTask(ctx, issue, "comment")
+	// Trigger orchestrator to handle the task
+	m.triggerOrchestrator(ctx, *issue.Number, task)
 }
 
 func (m *IssueMonitor) extractTask(issue *github.Issue) string {
@@ -198,19 +198,39 @@ func (m *IssueMonitor) extractTaskFromComment(comment *github.IssueComment) stri
 	return strings.TrimSpace(task)
 }
 
-func (m *IssueMonitor) acknowledgeTask(ctx context.Context, issue *github.Issue, source string) {
-	// Post acknowledgment comment
-	body := fmt.Sprintf("🤖 Task received from %s. Starting execution...\n\nIssue ID: #%d\nContainer: `claude-worker-%d`", 
-		source, *issue.Number, *issue.Number)
+// triggerOrchestrator communicates with orchestrator to process the task
+func (m *IssueMonitor) triggerOrchestrator(ctx context.Context, issueNumber int, task string) {
+	// In a real implementation, this would communicate with the orchestrator
+	// via HTTP, gRPC, or message queue. For now, we'll simulate it.
 	
-	comment := &github.IssueComment{
-		Body: &body,
-	}
+	log.Printf("Triggering orchestrator for issue #%d", issueNumber)
+	
+	// For this implementation, we'll spawn the orchestrator process
+	// In production, the orchestrator would be a separate service
+	go m.executeOrchestratorTask(ctx, issueNumber, task)
+}
 
-	_, _, err := m.client.Issues.CreateComment(ctx, m.owner, m.repo, *issue.Number, comment)
+func (m *IssueMonitor) executeOrchestratorTask(ctx context.Context, issueNumber int, task string) {
+	// This simulates calling the orchestrator
+	// In reality, this would be an HTTP request or RPC call
+	
+	cmd := exec.Command("go", "run", "./cmd/orchestrator/main.go", 
+		"-issue", strconv.Itoa(issueNumber), 
+		"-task", task)
+	
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Failed to post acknowledgment: %v", err)
+		log.Printf("Orchestrator execution failed for issue #%d: %v\nOutput: %s", 
+			issueNumber, err, output)
+		
+		// Post error to issue
+		errorBody := fmt.Sprintf("❌ **処理中にエラーが発生しました**\n\n```\n%s\n```", err.Error())
+		comment := &github.IssueComment{Body: &errorBody}
+		m.client.Issues.CreateComment(ctx, m.owner, m.repo, issueNumber, comment)
+		return
 	}
+	
+	log.Printf("Orchestrator completed task for issue #%d", issueNumber)
 }
 
 func main() {

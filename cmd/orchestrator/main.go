@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,253 +12,261 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
+	"github.com/google/go-github/v57/github"
+	"github.com/joho/godotenv"
+	"golang.org/x/oauth2"
 )
 
 type Orchestrator struct {
-	dockerClient     *client.Client
-	workspaceRoot    string
-	activeContainers sync.Map // issue_id -> ContainerInfo
-	mu               sync.Mutex
+	githubClient   *github.Client
+	workspaceRoot  string
+	sessionManager *SessionManager
+	owner          string
+	repo           string
+	mu             sync.Mutex
 }
 
-type ContainerInfo struct {
-	ID   string
-	Port int
+type SessionManager struct {
+	sessions sync.Map // issue_id -> SessionInfo
 }
 
-type AgentMessage struct {
-	IssueID string `json:"issue_id"`
-	Command string `json:"command"`
-	Type    string `json:"type"` // "exec", "result", "error"
+type SessionInfo struct {
+	SessionFile string
+	LastUsed    time.Time
+	CreatedAt   time.Time
 }
 
-type AgentResponse struct {
-	Success bool   `json:"success"`
-	Output  string `json:"output"`
-	Error   string `json:"error,omitempty"`
+type TaskExecution struct {
+	IssueID      string
+	Task         string
+	SessionFile  string
+	MaxTurns     int
+	OutputFormat string
 }
 
 func NewOrchestrator() (*Orchestrator, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return nil, err
+	// Load environment variables
+	if err := godotenv.Load(); err != nil {
+		log.Println("Warning: .env file not found, using environment variables")
 	}
 
-	workspaceRoot := filepath.Join(".", "shared", "workspaces")
+	// GitHub client
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return nil, fmt.Errorf("GITHUB_TOKEN not set")
+	}
+
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	tc := oauth2.NewClient(ctx, ts)
+	githubClient := github.NewClient(tc)
+
+	// Repository info
+	owner := os.Getenv("GITHUB_OWNER")
+	if owner == "" {
+		owner = "worldscandy"
+	}
+	repo := os.Getenv("GITHUB_REPO")
+	if repo == "" {
+		repo = "claude-automation"
+	}
+
+	// Workspace setup
+	workspaceRoot := filepath.Join(".", "workspaces")
 	os.MkdirAll(workspaceRoot, 0755)
 
 	return &Orchestrator{
-		dockerClient:  cli,
-		workspaceRoot: workspaceRoot,
+		githubClient:   githubClient,
+		workspaceRoot:  workspaceRoot,
+		sessionManager: &SessionManager{},
+		owner:          owner,
+		repo:           repo,
 	}, nil
 }
 
-func (o *Orchestrator) StartContainer(ctx context.Context, issueID string, image string) (string, error) {
-	containerName := fmt.Sprintf("claude-worker-%s", issueID)
-	workDir := filepath.Join(o.workspaceRoot, issueID)
+// ProcessIssueTask processes a GitHub issue with @claude mention
+func (o *Orchestrator) ProcessIssueTask(ctx context.Context, issueNumber int, task string) error {
+	issueID := strconv.Itoa(issueNumber)
+	log.Printf("Processing issue #%d: %s", issueNumber, task)
+
+	// Create session for this issue
+	sessionFile, err := o.sessionManager.CreateSession(issueID)
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+
+	// Execute task with Claude CLI
+	execution := &TaskExecution{
+		IssueID:      issueID,
+		Task:         task,
+		SessionFile:  sessionFile,
+		MaxTurns:     10, // Allow autonomous execution up to 10 turns
+		OutputFormat: "json",
+	}
+
+	result, err := o.ExecuteClaudeTask(ctx, execution)
+	if err != nil {
+		// Post error to issue
+		o.PostToIssue(ctx, issueNumber, fmt.Sprintf("❌ **エラーが発生しました**\n\n```\n%v\n```", err))
+		return err
+	}
+
+	// Post success result to issue
+	o.PostToIssue(ctx, issueNumber, fmt.Sprintf("✅ **タスク完了**\n\n%s", result))
+	log.Printf("Task completed for issue #%d", issueNumber)
+	return nil
+}
+
+// ExecuteClaudeTask executes a task using advanced Claude CLI features
+func (o *Orchestrator) ExecuteClaudeTask(ctx context.Context, execution *TaskExecution) (string, error) {
+	workDir := filepath.Join(o.workspaceRoot, execution.IssueID)
 	
-	// Create workspace directory
+	// Ensure workspace exists
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create workspace: %w", err)
 	}
 
-	// Get available port
-	port := o.getAvailablePort()
+	// Prepare Claude CLI command with advanced features
+	args := []string{
+		"--print", // Non-interactive mode with output
+		"--max-turns", strconv.Itoa(execution.MaxTurns), // Allow autonomous execution
+		"--verbose", // Get detailed progress
+	}
 	
-	// Get absolute paths
-	absWorkDir, _ := filepath.Abs(workDir)
-	absAgentPath, _ := filepath.Abs("./cmd/agent/agent")
+	if execution.OutputFormat != "" {
+		args = append(args, "--output-format", execution.OutputFormat)
+	}
 	
-	// Container configuration
-	config := &container.Config{
-		Image: image,
-		Env: []string{
-			fmt.Sprintf("ISSUE_ID=%s", issueID),
-			fmt.Sprintf("AGENT_PORT=%d", port),
-		},
-		Cmd: []string{"/agent"},
-		WorkingDir: "/workspace",
-		ExposedPorts: map[string]struct{}{
-			fmt.Sprintf("%d/tcp", port): {},
-		},
+	if execution.SessionFile != "" {
+		args = append(args, "--continue", execution.SessionFile)
 	}
 
-	// Host configuration with mounts
-	hostConfig := &container.HostConfig{
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeBind,
-				Source: absWorkDir,
-				Target: "/workspace",
-			},
-			{
-				Type:   mount.TypeBind,
-				Source: absAgentPath,
-				Target: "/agent",
-				ReadOnly: true,
-			},
-		},
-		PortBindings: map[string][]container.PortBinding{
-			fmt.Sprintf("%d/tcp", port): {
-				{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)},
-			},
-		},
-		AutoRemove: true,
-	}
-
-	// Create container
-	resp, err := o.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, containerName)
-	if err != nil {
-		return "", fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Start container
-	if err := o.dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		return "", fmt.Errorf("failed to start container: %w", err)
-	}
-
-	// Store container info
-	containerInfo := ContainerInfo{
-		ID:   resp.ID,
-		Port: port,
-	}
-	o.activeContainers.Store(issueID, containerInfo)
+	// Build comprehensive task context
+	taskContext := o.buildTaskContext(execution)
 	
-	log.Printf("Started container %s for issue %s on port %d", resp.ID[:12], issueID, port)
-	return resp.ID, nil
-}
-
-func (o *Orchestrator) getAvailablePort() int {
-	// Simple port allocation starting from 8080
-	// In production, this should be more sophisticated
-	basePort := 8080
-	for i := 0; i < 100; i++ {
-		port := basePort + i
-		if o.isPortAvailable(port) {
-			return port
-		}
-	}
-	return basePort // fallback
-}
-
-func (o *Orchestrator) isPortAvailable(port int) bool {
-	// Check if port is already used by existing containers
-	o.activeContainers.Range(func(key, value interface{}) bool {
-		containerInfo := value.(ContainerInfo)
-		if containerInfo.Port == port {
-			return false // port is used
-		}
-		return true
-	})
-	return true
-}
-
-func (o *Orchestrator) ExecuteClaudeCommand(ctx context.Context, issueID, instruction string) (string, error) {
-	workDir := filepath.Join(o.workspaceRoot, issueID)
-	
-	// Check if container exists
-	containerID, ok := o.activeContainers.Load(issueID)
-	if !ok {
-		return "", fmt.Errorf("no container for issue %s", issueID)
-	}
-
-	// Prepare context for Claude
-	context := fmt.Sprintf(`You are working in a Docker container environment.
-Working directory: /workspace (mounted from %s)
-Container ID: %s
-To execute commands in the container, output them in the following format:
-EXEC: <command>
-For example:
-EXEC: pip install requests
-EXEC: python script.py`, workDir, containerID.(string)[:12])
-
 	// Execute Claude CLI
-	cmd := exec.Command("claude", "--print")
+	cmd := exec.Command("claude", args...)
 	cmd.Dir = workDir
-	cmd.Stdin = strings.NewReader(fmt.Sprintf("%s\n\n%s", context, instruction))
+	cmd.Stdin = strings.NewReader(taskContext)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("claude command failed: %w\nOutput: %s", err, output)
 	}
 
-	// Parse output for EXEC commands
-	result := string(output)
-	lines := strings.Split(result, "\n")
+	// Update session usage
+	o.sessionManager.UpdateSessionUsage(execution.IssueID)
 	
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "EXEC:") {
-			command := strings.TrimSpace(strings.TrimPrefix(line, "EXEC:"))
-			if execResult, err := o.ExecuteInContainer(ctx, issueID, command); err != nil {
-				log.Printf("Failed to execute in container: %v", err)
-			} else {
-				log.Printf("Container execution result: %s", execResult)
-			}
-		}
-	}
-
-	return result, nil
+	return string(output), nil
 }
 
-func (o *Orchestrator) ExecuteInContainer(ctx context.Context, issueID, command string) (string, error) {
-	// Get container info
-	containerInfoVal, ok := o.activeContainers.Load(issueID)
-	if !ok {
-		return "", fmt.Errorf("no container for issue %s", issueID)
+// buildTaskContext creates comprehensive context for Claude CLI
+func (o *Orchestrator) buildTaskContext(execution *TaskExecution) string {
+	return fmt.Sprintf(`## GitHub Issue Automation Context
+
+You are Claude Code automating GitHub issue processing. Your task is to autonomously complete the following request.
+
+### Issue ID: #%s
+### Task: %s
+
+### Available Tools:
+- Read/Write/Edit files using Claude Code tools
+- TodoWrite/TodoRead for task management
+- Bash tool for command execution
+- All MCP tools are available
+
+### Instructions:
+1. Use TodoWrite to plan your approach
+2. Break down the task into manageable steps
+3. Execute each step using appropriate tools
+4. Provide clear progress updates
+5. Ensure all work is completed within the workspace
+
+### Workspace: %s
+
+Begin processing this task autonomously. Use --continue if you need multiple conversation turns.`,
+		execution.IssueID,
+		execution.Task,
+		filepath.Join(o.workspaceRoot, execution.IssueID))
+}
+
+// SessionManager methods
+func (sm *SessionManager) CreateSession(issueID string) (string, error) {
+	sessionDir := filepath.Join(".", "sessions")
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create session directory: %w", err)
 	}
-	containerInfo := containerInfoVal.(ContainerInfo)
 	
-	// Connect to agent socket in container's namespace
-	socketPath := fmt.Sprintf("/tmp/claude-agent-%s.sock", issueID)
-	conn, err := net.Dial("unix", socketPath)
+	sessionFile := filepath.Join(sessionDir, fmt.Sprintf("issue-%s.session", issueID))
+	
+	sessionInfo := SessionInfo{
+		SessionFile: sessionFile,
+		CreatedAt:   time.Now(),
+		LastUsed:    time.Now(),
+	}
+	
+	sm.sessions.Store(issueID, sessionInfo)
+	
+	// Create empty session file
+	if _, err := os.Create(sessionFile); err != nil {
+		return "", fmt.Errorf("failed to create session file: %w", err)
+	}
+	
+	log.Printf("Created session file for issue %s: %s", issueID, sessionFile)
+	return sessionFile, nil
+}
+
+func (sm *SessionManager) UpdateSessionUsage(issueID string) {
+	if sessionInfoVal, ok := sm.sessions.Load(issueID); ok {
+		sessionInfo := sessionInfoVal.(SessionInfo)
+		sessionInfo.LastUsed = time.Now()
+		sm.sessions.Store(issueID, sessionInfo)
+	}
+}
+
+func (sm *SessionManager) GetSession(issueID string) (string, bool) {
+	if sessionInfoVal, ok := sm.sessions.Load(issueID); ok {
+		sessionInfo := sessionInfoVal.(SessionInfo)
+		return sessionInfo.SessionFile, true
+	}
+	return "", false
+}
+
+// PostToIssue posts a comment to a GitHub issue
+func (o *Orchestrator) PostToIssue(ctx context.Context, issueNumber int, message string) error {
+	comment := &github.IssueComment{
+		Body: &message,
+	}
+	
+	_, _, err := o.githubClient.Issues.CreateComment(ctx, o.owner, o.repo, issueNumber, comment)
 	if err != nil {
-		return "", fmt.Errorf("failed to connect to agent: %w", err)
-	}
-	defer conn.Close()
-
-	// Send command
-	msg := AgentMessage{
-		IssueID: issueID,
-		Command: command,
-		Type:    "exec",
+		log.Printf("Failed to post comment to issue #%d: %v", issueNumber, err)
+		return err
 	}
 	
-	if err := json.NewEncoder(conn).Encode(msg); err != nil {
-		return "", fmt.Errorf("failed to send command: %w", err)
-	}
-
-	// Read response
-	var resp AgentResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if !resp.Success {
-		return "", fmt.Errorf("command failed: %s", resp.Error)
-	}
-
-	return resp.Output, nil
+	log.Printf("Posted comment to issue #%d", issueNumber)
+	return nil
 }
 
-func (o *Orchestrator) StopContainer(ctx context.Context, issueID string) error {
-	containerID, ok := o.activeContainers.Load(issueID)
-	if !ok {
-		return fmt.Errorf("no container for issue %s", issueID)
+// Integration with monitor - this would be called by the monitor
+func (o *Orchestrator) HandleIssueRequest(ctx context.Context, issueNumber int, task string) {
+	log.Printf("Received issue processing request: #%d", issueNumber)
+	
+	// Acknowledge the task
+	acknowledgment := fmt.Sprintf("🤖 **Claude Automation System**\n\nタスクを受信しました。処理を開始します...\n\n**Issue ID:** #%d\n**Session:** `issue-%d`\n**Workspace:** `shared/workspaces/%d/`", 
+		issueNumber, issueNumber, issueNumber)
+	
+	if err := o.PostToIssue(ctx, issueNumber, acknowledgment); err != nil {
+		log.Printf("Failed to acknowledge task: %v", err)
+		return
 	}
-
-	timeout := 10
-	if err := o.dockerClient.ContainerStop(ctx, containerID.(string), container.StopOptions{
-		Timeout: &timeout,
-	}); err != nil {
-		return fmt.Errorf("failed to stop container: %w", err)
-	}
-
-	o.activeContainers.Delete(issueID)
-	return nil
+	
+	// Process the task asynchronously
+	go func() {
+		if err := o.ProcessIssueTask(ctx, issueNumber, task); err != nil {
+			log.Printf("Failed to process issue #%d: %v", issueNumber, err)
+		}
+	}()
 }
 
 func main() {
@@ -272,30 +277,45 @@ func main() {
 		log.Fatal("Failed to create orchestrator:", err)
 	}
 
-	// Test with a sample issue
+	// Check for command line arguments for issue processing
+	if len(os.Args) >= 5 && os.Args[1] == "-issue" && os.Args[3] == "-task" {
+		issueNumber, err := strconv.Atoi(os.Args[2])
+		if err != nil {
+			log.Fatal("Invalid issue number:", err)
+		}
+		
+		task := os.Args[4]
+		
+		log.Printf("Processing issue #%d with task: %s", issueNumber, task)
+		
+		// Process the issue task
+		orchestrator.HandleIssueRequest(ctx, issueNumber, task)
+		
+		// Wait for completion (in real implementation, this would be handled differently)
+		time.Sleep(30 * time.Second)
+		return
+	}
+
+	// Default mode: Run as standalone service
+	log.Println("Starting Orchestrator in service mode...")
+	
+	// Test with a sample issue if no arguments provided
 	issueID := "test-001"
 	
-	// Start container
-	containerID, err := orchestrator.StartContainer(ctx, issueID, "alpine:latest")
-	if err != nil {
-		log.Fatal("Failed to start container:", err)
+	// Test Claude CLI integration without container
+	log.Printf("Testing Claude CLI integration...")
+	
+	execution := &TaskExecution{
+		IssueID:      issueID,
+		Task:         "Create a simple test file with 'Hello World' content",
+		MaxTurns:     3,
+		OutputFormat: "json",
 	}
 	
-	log.Printf("Started container: %s", containerID[:12])
-	
-	// Wait for agent to initialize
-	time.Sleep(2 * time.Second)
-
-	// Test Claude command
-	result, err := orchestrator.ExecuteClaudeCommand(ctx, issueID, 
-		"Create a simple shell script that prints 'Hello from Container!' and execute it to test the environment")
+	result, err := orchestrator.ExecuteClaudeTask(ctx, execution)
 	if err != nil {
-		log.Printf("Failed to execute Claude command: %v", err)
+		log.Printf("Failed to execute Claude task: %v", err)
 	} else {
-		log.Printf("Claude output:\n%s", result)
+		log.Printf("Claude task result:\n%s", result)
 	}
-
-	// Cleanup
-	time.Sleep(5 * time.Second)
-	orchestrator.StopContainer(ctx, issueID)
 }
