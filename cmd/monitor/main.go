@@ -24,6 +24,12 @@ type IssueMonitor struct {
 	lastChecked  time.Time
 }
 
+type IssueRequest struct {
+	IssueNumber int
+	Task        string
+	Repository  string
+}
+
 func NewIssueMonitor() (*IssueMonitor, error) {
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
@@ -165,22 +171,30 @@ func (m *IssueMonitor) handleIssue(ctx context.Context, issue *github.Issue) {
 	// Extract task from issue
 	task := m.extractTask(issue)
 	
+	// Detect target repository
+	repository := m.detectTargetRepository(issue, task)
+	
 	log.Printf("Processing task from issue #%d", *issue.Number)
 	log.Printf("Task: %s", task)
+	log.Printf("Target repository: %s", repository)
 
 	// Trigger orchestrator to handle the task
-	m.triggerOrchestrator(ctx, *issue.Number, task)
+	m.triggerOrchestrator(ctx, *issue.Number, task, repository)
 }
 
 func (m *IssueMonitor) handleIssueComment(ctx context.Context, issue *github.Issue, comment *github.IssueComment) {
 	// Extract task from comment
 	task := m.extractTaskFromComment(comment)
 	
+	// Detect target repository
+	repository := m.detectTargetRepository(issue, task)
+	
 	log.Printf("Processing task from comment on issue #%d", *issue.Number)
 	log.Printf("Task: %s", task)
+	log.Printf("Target repository: %s", repository)
 
 	// Trigger orchestrator to handle the task
-	m.triggerOrchestrator(ctx, *issue.Number, task)
+	m.triggerOrchestrator(ctx, *issue.Number, task, repository)
 }
 
 func (m *IssueMonitor) extractTask(issue *github.Issue) string {
@@ -198,25 +212,70 @@ func (m *IssueMonitor) extractTaskFromComment(comment *github.IssueComment) stri
 	return strings.TrimSpace(task)
 }
 
+// detectTargetRepository determines which repository the task should target
+func (m *IssueMonitor) detectTargetRepository(issue *github.Issue, task string) string {
+	// Priority 1: Look for explicit repository mention in task
+	repoRegex := regexp.MustCompile(`(?i)(?:repository|repo):\s*([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)`)
+	if matches := repoRegex.FindStringSubmatch(task); len(matches) > 1 {
+		return matches[1]
+	}
+	
+	// Priority 2: Look for GitHub URL patterns
+	urlRegex := regexp.MustCompile(`https://github\.com/([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)`)
+	fullText := ""
+	if issue.Body != nil {
+		fullText += *issue.Body + " "
+	}
+	fullText += task
+	
+	if matches := urlRegex.FindStringSubmatch(fullText); len(matches) > 1 {
+		return matches[1]
+	}
+	
+	// Priority 3: Look for owner/repo pattern in text
+	ownerRepoRegex := regexp.MustCompile(`\b([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)\b`)
+	if matches := ownerRepoRegex.FindStringSubmatch(task); len(matches) > 1 {
+		// Validate this looks like a repository
+		parts := strings.Split(matches[1], "/")
+		if len(parts) == 2 && !strings.Contains(matches[1], ".") {
+			return matches[1]
+		}
+	}
+	
+	// Priority 4: Check issue labels for repository hints
+	for _, label := range issue.Labels {
+		if label.Name != nil {
+			labelName := *label.Name
+			if strings.HasPrefix(labelName, "repo:") {
+				return strings.TrimPrefix(labelName, "repo:")
+			}
+		}
+	}
+	
+	// Priority 5: Use current repository as default
+	return fmt.Sprintf("%s/%s", m.owner, m.repo)
+}
+
 // triggerOrchestrator communicates with orchestrator to process the task
-func (m *IssueMonitor) triggerOrchestrator(ctx context.Context, issueNumber int, task string) {
+func (m *IssueMonitor) triggerOrchestrator(ctx context.Context, issueNumber int, task string, repository string) {
 	// In a real implementation, this would communicate with the orchestrator
 	// via HTTP, gRPC, or message queue. For now, we'll simulate it.
 	
-	log.Printf("Triggering orchestrator for issue #%d", issueNumber)
+	log.Printf("Triggering orchestrator for issue #%d (repository: %s)", issueNumber, repository)
 	
 	// For this implementation, we'll spawn the orchestrator process
 	// In production, the orchestrator would be a separate service
-	go m.executeOrchestratorTask(ctx, issueNumber, task)
+	go m.executeOrchestratorTask(ctx, issueNumber, task, repository)
 }
 
-func (m *IssueMonitor) executeOrchestratorTask(ctx context.Context, issueNumber int, task string) {
+func (m *IssueMonitor) executeOrchestratorTask(ctx context.Context, issueNumber int, task string, repository string) {
 	// This simulates calling the orchestrator
 	// In reality, this would be an HTTP request or RPC call
 	
 	cmd := exec.Command("go", "run", "./cmd/orchestrator/main.go", 
 		"-issue", strconv.Itoa(issueNumber), 
-		"-task", task)
+		"-task", task,
+		"-repo", repository)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -230,7 +289,7 @@ func (m *IssueMonitor) executeOrchestratorTask(ctx context.Context, issueNumber 
 		return
 	}
 	
-	log.Printf("Orchestrator completed task for issue #%d", issueNumber)
+	log.Printf("Orchestrator completed task for issue #%d (repository: %s)", issueNumber, repository)
 }
 
 func main() {
