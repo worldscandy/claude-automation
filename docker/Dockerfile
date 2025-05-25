@@ -95,10 +95,13 @@ RUN apk add --no-cache \
 # Install Claude CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
-# Fix Claude CLI env compatibility for Alpine Linux
-RUN if [ -f /usr/local/bin/claude ]; then \
-    sed -i '1s|#!/usr/bin/env -S node|#!/usr/bin/env node|' /usr/local/bin/claude; \
-    fi
+# Fix Claude CLI env compatibility for Alpine Linux - more robust approach
+RUN cp /usr/local/bin/claude /tmp/claude.orig && \
+    echo '#!/usr/bin/env node' > /usr/local/bin/claude && \
+    tail -n +2 /tmp/claude.orig >> /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude && \
+    echo "Claude CLI shebang fixed" && \
+    head -3 /usr/local/bin/claude
 
 # Create non-root user
 RUN adduser -D -s /bin/bash claude
