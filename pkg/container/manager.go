@@ -237,12 +237,15 @@ func (cm *ContainerManager) buildDockerCommand(containerID string, config *Repos
 	if err := cm.generateContainerAuthFiles(tempAuthDir); err != nil {
 		log.Printf("Warning: failed to generate auth files, using fallback: %v", err)
 		// Fallback: mount empty directory for safety
-		cmd = append(cmd, "-v", "/tmp/empty:/app/auth:ro")
+		cmd = append(cmd, "-v", "/tmp/empty:/home/claude/.claude:ro")
 	} else {
-		// Mount generated auth directory to claude home for direct access
-		cmd = append(cmd, "-v", fmt.Sprintf("%s:/home/claude/.claude", tempAuthDir))
+		// Mount generated auth structure to claude home 
+		// Structure: tempAuthDir/.claude.json -> /home/claude/.claude.json (read-write for CLI updates)
+		//           tempAuthDir/.claude/.credentials.json -> /home/claude/.claude/.credentials.json
+		cmd = append(cmd, "-v", fmt.Sprintf("%s/.claude.json:/home/claude/.claude.json:rw", tempAuthDir))
+		cmd = append(cmd, "-v", fmt.Sprintf("%s/.claude:/home/claude/.claude:rw", tempAuthDir))
 		
-		log.Printf("Mounting generated auth directory: %s -> /home/claude/.claude", tempAuthDir)
+		log.Printf("Mounting auth files: %s -> /home/claude/", tempAuthDir)
 	}
 
 	// Add environment variables
@@ -362,15 +365,22 @@ func (cm *ContainerManager) RefreshContainerAuth(ctx context.Context, containerI
 		return fmt.Errorf("failed to generate auth files: %w", err)
 	}
 	
-	// Copy new auth files into the running container
-	copyCmd := fmt.Sprintf("docker cp %s/. %s:/home/claude/.claude/", tempAuthDir, containerID)
-	cmd := exec.CommandContext(ctx, "sh", "-c", copyCmd)
+	// Copy .claude.json to container home root
+	copyClaudeJsonCmd := fmt.Sprintf("docker cp %s/.claude.json %s:/home/claude/.claude.json", tempAuthDir, containerID)
+	cmd := exec.CommandContext(ctx, "sh", "-c", copyClaudeJsonCmd)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to copy auth files to container: %w", err)
+		return fmt.Errorf("failed to copy .claude.json to container: %w", err)
+	}
+	
+	// Copy .credentials.json to container .claude directory
+	copyCredsCmd := fmt.Sprintf("docker cp %s/.claude/.credentials.json %s:/home/claude/.claude/.credentials.json", tempAuthDir, containerID)
+	cmd = exec.CommandContext(ctx, "sh", "-c", copyCredsCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to copy .credentials.json to container: %w", err)
 	}
 	
 	// Fix permissions inside container
-	permCmd := "sudo chown -R claude:claude /home/claude/.claude && sudo chmod -R u+w /home/claude/.claude"
+	permCmd := "sudo chown claude:claude /home/claude/.claude.json /home/claude/.claude/.credentials.json && sudo chmod 600 /home/claude/.claude.json /home/claude/.claude/.credentials.json"
 	if _, err := cm.ExecuteInContainer(ctx, containerID, permCmd); err != nil {
 		log.Printf("Warning: failed to fix auth permissions in container: %v", err)
 	}

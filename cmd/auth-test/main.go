@@ -43,15 +43,15 @@ func main() {
 	}
 	fmt.Println("✅ Auth files generated successfully")
 
-	// Verify generated files
+	// Verify generated files with correct structure
 	claudeJsonPath := filepath.Join(testDir, ".claude.json")
-	credentialsPath := filepath.Join(testDir, ".claude.credentials.json")
+	credentialsPath := filepath.Join(testDir, ".claude", ".credentials.json")
 
 	if _, err := os.Stat(claudeJsonPath); os.IsNotExist(err) {
-		log.Fatalf(".claude.json not generated")
+		log.Fatalf(".claude.json not generated at %s", claudeJsonPath)
 	}
 	if _, err := os.Stat(credentialsPath); os.IsNotExist(err) {
-		log.Fatalf(".claude.credentials.json not generated")
+		log.Fatalf(".credentials.json not generated at %s", credentialsPath)
 	}
 
 	fmt.Printf("Generated files:\n")

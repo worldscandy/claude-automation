@@ -1,4 +1,4 @@
-.PHONY: build test clean run-test k8s-build k8s-deploy k8s-clean monitor
+.PHONY: build test clean run-test k8s-build k8s-deploy k8s-clean monitor token-renewal auth-test
 
 build:
 	@echo "Building orchestrator..."
@@ -51,3 +51,12 @@ k8s-test: k8s-build k8s-deploy
 	@echo "Testing Kubernetes deployment..."
 	kubectl wait --for=condition=ready pod -l app=claude-automation --timeout=300s
 	kubectl logs -l app=claude-automation --tail=50
+
+# Authentication and Token Management
+token-renewal:
+	@echo "Starting Claude CLI token renewal container..."
+	go run ./cmd/token-renewal
+
+auth-test:
+	@echo "Running authentication system tests..."
+	go run ./cmd/auth-test

@@ -1,0 +1,77 @@
+# Token Renewal Container - Claude Code installed but not logged in
+FROM node:20
+
+# Create claude user
+RUN useradd -m -s /bin/bash claude
+
+# Install Claude CLI globally and utilities
+RUN npm install -g @anthropic-ai/claude-code && \
+    apt-get update && apt-get install -y sudo curl jq && \
+    echo "claude ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create necessary directories
+RUN mkdir -p /home/claude/.claude/todos \
+             /home/claude/.claude/projects \
+             /home/claude/.claude/statsig \
+             /home/claude/workspace \
+             /app/scripts
+
+# Copy token renewal helper script
+COPY scripts/token-renewal.sh /app/scripts/token-renewal.sh
+RUN chmod +x /app/scripts/token-renewal.sh
+
+# Set ownership
+RUN chown -R claude:claude /home/claude /app
+
+# Create a helpful welcome script
+RUN cat > /home/claude/README-TOKEN-RENEWAL.md << 'EOF'
+# 🔐 Claude CLI Token Renewal Guide
+
+This container is prepared for Claude CLI token renewal.
+
+## Steps to renew your token:
+
+1. **Run Claude Login**:
+   ```bash
+   claude login
+   ```
+
+2. **Follow the authentication flow**:
+   - A browser URL will be displayed
+   - Open the URL in your browser  
+   - Complete Claude Pro Max authentication
+   - Copy the authentication code from browser
+   - Paste the code back in the terminal
+
+3. **Extract token information**:
+   ```bash
+   /app/scripts/token-renewal.sh
+   ```
+
+4. **Update .env-secret on host**:
+   - Copy the output values
+   - Update your .env-secret file on the host system
+   - Restart the Container Orchestration system
+
+## Verification:
+```bash
+claude --version
+claude --print "Hello, test authentication"
+```
+
+## Files generated:
+- `~/.claude.json` - User profile and settings
+- `~/.claude/.credentials.json` - OAuth authentication token
+
+The helper script will extract the necessary values for your .env-secret file.
+EOF
+
+# Set working directory
+WORKDIR /home/claude
+
+# Switch to claude user
+USER claude
+
+# Display welcome message on container start
+CMD ["bash", "-c", "echo '🔐 Claude CLI Token Renewal Container Ready!' && echo '📖 See README-TOKEN-RENEWAL.md for instructions' && echo '🚀 Run: claude login' && echo && exec bash"]
