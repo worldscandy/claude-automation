@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+docs/
+*.md
+
+# Test files
+test/
+*_test.go
+
+# Development files
+.env*
+auth/
+sessions/
+workspaces/
+logs/
+bin/
+
+# Build artifacts
+vendor/
+node_modules/
+
+# Temporary files
+*.tmp
+*.log
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo

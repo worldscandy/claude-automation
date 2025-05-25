@@ -1,0 +1,116 @@
+services:
+  claude-monitor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: claude-automation-monitor
+    restart: unless-stopped
+    privileged: true
+    
+    # Docker-in-Docker (DinD) setup
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - ./auth:/app/auth:ro
+      - ./config:/app/config:ro
+      - ./workspaces:/app/workspaces:rw
+      - ./sessions:/app/sessions:rw
+      - ./logs:/app/logs:rw
+    
+    # Environment variables
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_OWNER=${GITHUB_OWNER:-worldscandy}
+      - GITHUB_REPO=${GITHUB_REPO:-claude-automation}
+      - CLAUDE_CLI_PATH=/usr/local/bin/claude
+      - WORKSPACES_DIR=/app/workspaces
+      - SESSIONS_DIR=/app/sessions
+      - CONTAINER_MANAGER_MODE=docker
+      - LOG_LEVEL=info
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "ps", "aux", "|", "grep", "monitor"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Security settings (relaxed for Docker-in-Docker)
+    # security_opt:
+    #   - no-new-privileges:true
+    
+    # Network
+    networks:
+      - claude-automation
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Monitoring and observability
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: claude-automation-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - claude-automation
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: claude-automation-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - claude-automation
+    profiles:
+      - monitoring
+
+# Networks
+networks:
+  claude-automation:
+    driver: bridge
+    name: claude-automation-network
+
+# Volumes for data persistence
+volumes:
+  prometheus_data:
+    driver: local
+    name: claude-automation-prometheus
+  grafana_data:
+    driver: local
+    name: claude-automation-grafana

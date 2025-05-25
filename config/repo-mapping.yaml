@@ -1,0 +1,154 @@
+# Repository to Docker Image Mapping Configuration
+# This file defines which Docker images to use for different repositories
+
+repositories:
+  # Frontend repositories
+  worldscandy/frontend-app:
+    image: "node:18-alpine"
+    workspace: "/app"
+    env:
+      - NODE_ENV=development
+    ports:
+      - "3000:3000"
+    commands:
+      setup: "npm install"
+      test: "npm test"
+      build: "npm run build"
+  
+  worldscandy/react-project:
+    image: "node:20-alpine"
+    workspace: "/app"
+    env:
+      - NODE_ENV=development
+    ports:
+      - "3000:3000"
+    commands:
+      setup: "npm install"
+      test: "npm test"
+      build: "npm run build"
+
+  # Backend repositories
+  worldscandy/go-service:
+    image: "golang:1.21-alpine"
+    workspace: "/go/src/app"
+    env:
+      - GOOS=linux
+      - CGO_ENABLED=0
+    ports:
+      - "8080:8080"
+    commands:
+      setup: "go mod download"
+      test: "go test ./..."
+      build: "go build -o main ."
+
+  worldscandy/java-service:
+    image: "openjdk:17-alpine"
+    workspace: "/app"
+    env:
+      - JAVA_OPTS=-Xmx512m
+    ports:
+      - "8080:8080"
+    commands:
+      setup: "./gradlew build"
+      test: "./gradlew test"
+      build: "./gradlew bootJar"
+
+  # Python/ML repositories
+  worldscandy/ml-project:
+    image: "python:3.11-alpine"
+    workspace: "/workspace"
+    env:
+      - PYTHONPATH=/workspace
+      - PIP_NO_CACHE_DIR=1
+    ports:
+      - "8888:8888"
+    commands:
+      setup: "pip install -r requirements.txt"
+      test: "pytest"
+      build: "python setup.py build"
+
+  worldscandy/data-analysis:
+    image: "jupyter/scipy-notebook:latest"
+    workspace: "/home/jovyan/work"
+    env:
+      - JUPYTER_ENABLE_LAB=yes
+    ports:
+      - "8888:8888"
+    commands:
+      setup: "pip install -r requirements.txt"
+      test: "pytest"
+      build: "python -m pip install ."
+
+  # Database repositories
+  worldscandy/postgres-project:
+    image: "postgres:15-alpine"
+    workspace: "/var/lib/postgresql/data"
+    env:
+      - POSTGRES_DB=claude_automation
+      - POSTGRES_USER=claude
+      - POSTGRES_PASSWORD=changeme
+    ports:
+      - "5432:5432"
+    commands:
+      setup: "psql -c 'SELECT version();'"
+      test: "pg_isready"
+      build: "pg_dump > backup.sql"
+
+  # Infrastructure repositories
+  worldscandy/terraform-infra:
+    image: "hashicorp/terraform:latest"
+    workspace: "/workspace"
+    env:
+      - TF_IN_AUTOMATION=true
+    commands:
+      setup: "terraform init"
+      test: "terraform validate"
+      build: "terraform plan"
+
+  worldscandy/kubernetes-manifests:
+    image: "bitnami/kubectl:latest"
+    workspace: "/workspace"
+    commands:
+      setup: "kubectl version --client"
+      test: "kubectl validate -f ."
+      build: "kubectl diff -f ."
+
+  # Claude Automation System (this repository)
+  worldscandy/claude-automation:
+    image: "worldscandy/claude-automation:k8s"
+    workspace: "/workspace"
+    env:
+      - NODE_ENV=development
+    commands:
+      setup: "npm --version && claude --version"
+      test: "claude --help"
+      build: "echo 'Claude CLI ready'"
+
+# Default fallback configuration - Claude CLI enabled
+default:
+  image: "worldscandy/claude-automation:k8s"
+  workspace: "/workspace"
+  env:
+    - NODE_ENV=development
+  commands:
+    setup: "npm --version && claude --version"
+    test: "claude --help"
+    build: "echo 'Claude CLI ready'"
+
+# Container resource limits
+resource_limits:
+  memory: "1g"
+  cpu: "1.0"
+  disk: "10g"
+  timeout: "1h"
+
+# Security settings
+security:
+  read_only_root: false
+  no_new_privileges: true
+  user: "1001:1001"
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE

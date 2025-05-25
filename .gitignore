@@ -20,6 +20,7 @@ go.work.sum
 
 # Environment and secrets
 .env
+.env-secret
 .env.local
 .env.*.local
 
