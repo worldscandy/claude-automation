@@ -60,3 +60,21 @@ token-renewal:
 auth-test:
 	@echo "Running authentication system tests..."
 	go run ./cmd/auth-test
+
+# Issue #13 - Claude CLI Kubernetes Integration
+claude-integration-test:
+	@echo "Testing Claude CLI Kubernetes Integration..."
+	@echo "Setting ORCHESTRATOR_MODE=kubernetes..."
+	ORCHESTRATOR_MODE=kubernetes go run ./cmd/orchestrator -issue 13 -task "Create a simple test file with Hello World content" -repo worldscandy/claude-automation
+
+claude-pod-test:
+	@echo "Testing direct Pod creation and Claude CLI execution..."
+	go run -tags integration ./cmd/integration-test
+
+# Issue #13 Development Workflow  
+issue-13-dev: build
+	@echo "Starting Issue #13 development environment..."
+	@echo "Building all components..."
+	@make k8s-build
+	@echo "Running integration test..."
+	@make claude-integration-test

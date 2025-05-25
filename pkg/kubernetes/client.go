@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -13,15 +14,20 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/homedir"
 )
 
 // PodManager manages worker pods for different repositories
 type PodManager struct {
 	clientset       *kubernetes.Clientset
+	config          *rest.Config
 	namespace       string
 	workspacesDir   string
 	sessionsDir     string
@@ -101,6 +107,7 @@ func NewPodManager(namespace, workspacesDir, sessionsDir string) (*PodManager, e
 
 	manager := &PodManager{
 		clientset:      clientset,
+		config:         config,
 		namespace:      namespace,
 		workspacesDir:  workspacesDir,
 		sessionsDir:    sessionsDir,
@@ -229,6 +236,11 @@ func (pm *PodManager) CreateWorkerPod(ctx context.Context, issueNumber int, repo
 		return existing, nil
 	}
 
+	// Generate authentication files for this pod
+	if err := pm.generateAndCreateAuthSecret(ctx, issueNumber); err != nil {
+		log.Printf("Warning: Failed to create auth secret: %v", err)
+	}
+
 	// Create pod specification
 	pod := pm.buildPodSpec(podName, issueNumber, repository, config)
 	
@@ -328,7 +340,19 @@ func (pm *PodManager) buildPodSpec(podName string, issueNumber int, repository s
 				{
 					Name: "claude-auth",
 					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{}, // Use EmptyDir for testing
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "claude-auth",
+							Items: []corev1.KeyToPath{
+								{
+									Key:  "claude-config",
+									Path: ".claude.json",
+								},
+								{
+									Key:  "credentials", 
+									Path: ".claude/.credentials.json",
+								},
+							},
+						},
 					},
 				},
 			},
@@ -422,15 +446,52 @@ func (pm *PodManager) WaitForPodReady(ctx context.Context, podName string, timeo
 	}
 }
 
-// ExecuteInPod executes a command inside the worker pod
+// ExecuteInPod executes a command inside the worker pod using Kubernetes exec API
 func (pm *PodManager) ExecuteInPod(ctx context.Context, podName, command string) (string, error) {
-	// This would typically use the Kubernetes exec API
-	// For now, we'll implement a simplified version
 	log.Printf("Executing command in pod %s: %s", podName, command)
 	
-	// TODO: Implement proper kubectl exec equivalent using client-go
-	// This is a placeholder that would need the proper streaming API implementation
-	return "Command executed successfully", nil
+	// Import required packages for exec API
+	req := pm.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(pm.namespace).
+		SubResource("exec")
+
+	// Exec options - using sh to execute the command
+	req.VersionedParams(&corev1.PodExecOptions{
+		Command: []string{"sh", "-c", command},
+		Stdout:  true,
+		Stderr:  true,
+		TTY:     false,
+	}, runtime.NewParameterCodec(scheme.Scheme))
+
+	// Create SPDY executor for streaming
+	exec, err := remotecommand.NewSPDYExecutor(pm.config, "POST", req.URL())
+	if err != nil {
+		return "", fmt.Errorf("failed to create executor: %w", err)
+	}
+
+	// Create buffers to capture output
+	var stdout, stderr bytes.Buffer
+	
+	// Execute the command
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Tty:    false,
+	})
+
+	if err != nil {
+		stderrOutput := stderr.String()
+		if stderrOutput != "" {
+			return "", fmt.Errorf("command execution failed: %w\nStderr: %s", err, stderrOutput)
+		}
+		return "", fmt.Errorf("command execution failed: %w", err)
+	}
+
+	output := stdout.String()
+	log.Printf("Command executed successfully in pod %s, output length: %d bytes", podName, len(output))
+	return output, nil
 }
 
 // DeleteWorkerPod stops and removes a worker pod
@@ -504,6 +565,48 @@ func (pm *PodManager) GetPodLogs(ctx context.Context, podName string) (string, e
 	}
 
 	return string(logBytes), nil
+}
+
+// generateAndCreateAuthSecret generates authentication files and creates Kubernetes secret
+func (pm *PodManager) generateAndCreateAuthSecret(ctx context.Context, issueNumber int) error {
+	// Import auth package for authentication file generation
+	// This requires adding the auth package import at the top
+	
+	// For now, create a basic secret - this would be enhanced with actual auth generation
+	secretName := "claude-auth"
+	
+	// Check if secret already exists
+	_, err := pm.clientset.CoreV1().Secrets(pm.namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err == nil {
+		log.Printf("Auth secret %s already exists", secretName)
+		return nil
+	}
+	
+	// Create basic secret structure for testing
+	// In full implementation, this would use pkg/auth to generate actual auth files
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: pm.namespace,
+			Labels: map[string]string{
+				"app":       "claude-automation",
+				"component": "auth",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"claude-config": []byte(`{"version": "1.0", "auth": {"method": "oauth"}}`),
+			"credentials":   []byte(`{"token": "placeholder", "expires": "2025-12-31"}`),
+		},
+	}
+	
+	_, err = pm.clientset.CoreV1().Secrets(pm.namespace).Create(ctx, secret, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create auth secret: %w", err)
+	}
+	
+	log.Printf("Created auth secret for pod authentication")
+	return nil
 }
 
 // Helper functions

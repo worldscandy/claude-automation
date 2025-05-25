@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/claude-automation/pkg/container"
+	"github.com/claude-automation/pkg/kubernetes"
 	"github.com/google/go-github/v57/github"
 	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
@@ -23,9 +24,11 @@ type Orchestrator struct {
 	workspaceRoot     string
 	sessionManager    *SessionManager
 	containerManager  *container.ContainerManager
+	podManager        *kubernetes.PodManager
 	owner             string
 	repo              string
 	containerMode     bool
+	kubernetesMode    bool
 	mu                sync.Mutex
 }
 
@@ -48,7 +51,9 @@ type TaskExecution struct {
 	MaxTurns        int
 	OutputFormat    string
 	UseContainer    bool
+	UseKubernetes   bool
 	WorkerContainer *container.WorkerContainer
+	WorkerPod       *kubernetes.WorkerPod
 }
 
 func NewOrchestrator() (*Orchestrator, error) {
@@ -88,7 +93,9 @@ func NewOrchestrator() (*Orchestrator, error) {
 
 	// Container manager setup
 	containerMode := os.Getenv("CONTAINER_MANAGER_MODE") == "docker"
+	kubernetesMode := os.Getenv("ORCHESTRATOR_MODE") == "kubernetes"
 	var containerManager *container.ContainerManager
+	var podManager *kubernetes.PodManager
 	
 	if containerMode {
 		configPath := filepath.Join(".", "config", "repo-mapping.yaml")
@@ -102,14 +109,33 @@ func NewOrchestrator() (*Orchestrator, error) {
 		}
 	}
 
+	// Kubernetes Pod Manager setup
+	if kubernetesMode {
+		namespace := os.Getenv("NAMESPACE")
+		if namespace == "" {
+			namespace = "claude-automation"
+		}
+		
+		pm, err := kubernetes.NewPodManager(namespace, workspaceRoot, sessionsDir)
+		if err != nil {
+			log.Printf("Warning: Failed to create pod manager: %v", err)
+			kubernetesMode = false
+		} else {
+			podManager = pm
+			log.Println("Kubernetes pod manager initialized successfully")
+		}
+	}
+
 	return &Orchestrator{
 		githubClient:     githubClient,
 		workspaceRoot:    workspaceRoot,
 		sessionManager:   &SessionManager{},
 		containerManager: containerManager,
+		podManager:       podManager,
 		owner:            owner,
 		repo:             repo,
 		containerMode:    containerMode,
+		kubernetesMode:   kubernetesMode,
 	}, nil
 }
 
@@ -124,11 +150,35 @@ func (o *Orchestrator) ProcessIssueTask(ctx context.Context, issueNumber int, ta
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Create worker container if in container mode
+	// Create worker container or pod based on mode
 	var workerContainer *container.WorkerContainer
+	var workerPod *kubernetes.WorkerPod
 	useContainer := o.containerMode && o.containerManager != nil
+	useKubernetes := o.kubernetesMode && o.podManager != nil
 	
-	if useContainer {
+	if useKubernetes {
+		// Kubernetes mode - create worker pod
+		config := &kubernetes.RepositoryConfig{
+			Image:     "claude-automation-claude", // From repo-mapping.yaml
+			Workspace: "/home/claude/workspace",
+			Env:       []string{"NODE_ENV=development"},
+		}
+		
+		workerPod, err = o.podManager.CreateWorkerPod(ctx, issueNumber, repository, config)
+		if err != nil {
+			log.Printf("Failed to create worker pod, falling back to host execution: %v", err)
+			useKubernetes = false
+		} else {
+			log.Printf("Created worker pod for issue #%d: %s", issueNumber, workerPod.ID)
+			
+			// Wait for pod to be ready
+			if err := o.podManager.WaitForPodReady(ctx, workerPod.PodName, 2*time.Minute); err != nil {
+				log.Printf("Pod failed to become ready, falling back to host execution: %v", err)
+				useKubernetes = false
+			}
+		}
+	} else if useContainer {
+		// Docker mode - create worker container
 		workerContainer, err = o.containerManager.CreateWorkerContainer(ctx, issueNumber, repository)
 		if err != nil {
 			log.Printf("Failed to create worker container, falling back to host execution: %v", err)
@@ -148,11 +198,19 @@ func (o *Orchestrator) ProcessIssueTask(ctx context.Context, issueNumber int, ta
 		MaxTurns:        10, // Allow autonomous execution up to 10 turns
 		OutputFormat:    "json",
 		UseContainer:    useContainer,
+		UseKubernetes:   useKubernetes,
 		WorkerContainer: workerContainer,
+		WorkerPod:       workerPod,
 	}
 
-	// Cleanup container when done
-	if useContainer && workerContainer != nil {
+	// Cleanup container or pod when done
+	if useKubernetes && workerPod != nil {
+		defer func() {
+			if err := o.podManager.DeleteWorkerPod(ctx, workerPod.PodName); err != nil {
+				log.Printf("Failed to cleanup worker pod: %v", err)
+			}
+		}()
+	} else if useContainer && workerContainer != nil {
 		defer func() {
 			if err := o.containerManager.StopWorkerContainer(ctx, workerContainer.ID); err != nil {
 				log.Printf("Failed to cleanup worker container: %v", err)
@@ -175,7 +233,9 @@ func (o *Orchestrator) ProcessIssueTask(ctx context.Context, issueNumber int, ta
 
 // ExecuteClaudeTask executes a task using advanced Claude CLI features
 func (o *Orchestrator) ExecuteClaudeTask(ctx context.Context, execution *TaskExecution) (string, error) {
-	if execution.UseContainer && execution.WorkerContainer != nil {
+	if execution.UseKubernetes && execution.WorkerPod != nil {
+		return o.executeInPod(ctx, execution)
+	} else if execution.UseContainer && execution.WorkerContainer != nil {
 		return o.executeInContainer(ctx, execution)
 	}
 	return o.executeOnHost(ctx, execution)
@@ -285,6 +345,66 @@ func (o *Orchestrator) executeInContainer(ctx context.Context, execution *TaskEx
 	return output, nil
 }
 
+// executeInPod executes Claude CLI inside a Kubernetes worker pod
+func (o *Orchestrator) executeInPod(ctx context.Context, execution *TaskExecution) (string, error) {
+	podName := execution.WorkerPod.PodName
+	
+	// Prepare Claude CLI command for pod execution
+	claudeArgs := []string{
+		"claude",
+		"--print",
+		"--max-turns", strconv.Itoa(execution.MaxTurns),
+		"--verbose",
+	}
+	
+	if execution.OutputFormat != "" {
+		claudeArgs = append(claudeArgs, "--output-format", execution.OutputFormat)
+	}
+	
+	if execution.SessionFile != "" {
+		// Map session file to pod path
+		sessionPath := "/app/sessions/" + filepath.Base(execution.SessionFile)
+		claudeArgs = append(claudeArgs, "--continue", sessionPath)
+	}
+
+	// Build task context
+	taskContext := o.buildTaskContext(execution)
+	
+	// Create temporary file with task context in pod
+	tempFile := fmt.Sprintf("/tmp/claude-task-%s.txt", execution.IssueID)
+	createTaskFileCmd := fmt.Sprintf("echo %s > %s", 
+		strings.ReplaceAll(taskContext, `"`, `\"`), tempFile)
+	
+	if _, err := o.podManager.ExecuteInPod(ctx, podName, createTaskFileCmd); err != nil {
+		return "", fmt.Errorf("failed to create task file in pod: %w", err)
+	}
+	
+	// Execute Claude CLI in pod with task file as input
+	claudeCmd := strings.Join(claudeArgs, " ") + " < " + tempFile
+	output, err := o.podManager.ExecuteInPod(ctx, podName, claudeCmd)
+	if err != nil {
+		// Get pod logs for debugging
+		logs, logErr := o.podManager.GetPodLogs(ctx, podName)
+		if logErr != nil {
+			log.Printf("Failed to get pod logs: %v", logErr)
+		} else {
+			log.Printf("Pod logs:\n%s", logs)
+		}
+		return "", fmt.Errorf("claude command failed in pod: %w\nOutput: %s", err, output)
+	}
+
+	// Cleanup temp file
+	cleanupCmd := "rm -f " + tempFile
+	if _, err := o.podManager.ExecuteInPod(ctx, podName, cleanupCmd); err != nil {
+		log.Printf("Warning: failed to cleanup temp file: %v", err)
+	}
+
+	// Update session usage
+	o.sessionManager.UpdateSessionUsage(execution.IssueID)
+	
+	return output, nil
+}
+
 // buildTaskContext creates comprehensive context for Claude CLI
 func (o *Orchestrator) buildTaskContext(execution *TaskExecution) string {
 	return fmt.Sprintf(`## GitHub Issue Automation Context
@@ -379,8 +499,10 @@ func (o *Orchestrator) HandleIssueRequest(ctx context.Context, issueNumber int, 
 	
 	// Determine execution mode
 	executionMode := "Host"
-	if o.containerMode {
-		executionMode = "Container"
+	if o.kubernetesMode {
+		executionMode = "Kubernetes Pod"
+	} else if o.containerMode {
+		executionMode = "Docker Container"
 	}
 	
 	// Acknowledge the task
