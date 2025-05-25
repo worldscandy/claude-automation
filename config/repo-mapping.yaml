@@ -115,8 +115,8 @@ repositories:
 
   # Claude Automation System (this repository)
   worldscandy/claude-automation:
-    image: "claude-automation-claude"
-    workspace: "/home/claude/workspace"
+    image: "worldscandy/claude-automation:k8s"
+    workspace: "/workspace"
     env:
       - NODE_ENV=development
     commands:
@@ -126,8 +126,8 @@ repositories:
 
 # Default fallback configuration - Claude CLI enabled
 default:
-  image: "claude-automation-claude"
-  workspace: "/home/claude/workspace"
+  image: "worldscandy/claude-automation:k8s"
+  workspace: "/workspace"
   env:
     - NODE_ENV=development
   commands:

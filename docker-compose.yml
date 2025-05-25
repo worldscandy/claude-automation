@@ -2,7 +2,8 @@ services:
   claude-monitor:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
+      target: production
     container_name: claude-automation-monitor
     restart: unless-stopped
     privileged: true

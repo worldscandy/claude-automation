@@ -1,4 +1,4 @@
-.PHONY: build test clean run-test k8s-build k8s-deploy k8s-clean monitor token-renewal auth-test test-auth-k8s test-orchestrator integration-tests
+.PHONY: build test clean run-test docker-build docker-build-k8s k8s-build k8s-deploy k8s-clean monitor token-renewal auth-test test-auth-k8s test-orchestrator integration-tests
 
 build:
 	@echo "Building orchestrator..."
@@ -30,14 +30,19 @@ clean:
 	rm -f cmd/agent/agent
 	rm -rf shared/workspaces/*
 
-docker-test:
-	docker build -t claude-agent-test -f Dockerfile.test .
-	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock claude-agent-test
+# Docker targets with new structure
+docker-build:
+	@echo "Building production Docker image..."
+	docker build -t worldscandy/claude-automation:latest --target production -f docker/Dockerfile .
+
+docker-build-k8s:
+	@echo "Building Kubernetes Docker image..."
+	docker build -t worldscandy/claude-automation:k8s --target kubernetes -f docker/Dockerfile .
 
 # Kubernetes targets
 k8s-build: monitor
 	@echo "Building Kubernetes image..."
-	docker build -t worldscandy/claude-automation:latest -f Dockerfile.k8s .
+	docker build -t worldscandy/claude-automation:k8s --target kubernetes -f docker/Dockerfile .
 
 k8s-deploy:
 	@echo "Deploying to Kubernetes..."

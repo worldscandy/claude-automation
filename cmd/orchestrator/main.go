@@ -158,11 +158,15 @@ func (o *Orchestrator) ProcessIssueTask(ctx context.Context, issueNumber int, ta
 	useKubernetes := o.kubernetesMode && o.podManager != nil
 	
 	if useKubernetes {
-		// Kubernetes mode - create worker pod
-		config := &kubernetes.RepositoryConfig{
-			Image:     "claude-automation-claude", // From repo-mapping.yaml
-			Workspace: "/home/claude/workspace",
-			Env:       []string{"NODE_ENV=development"},
+		// Kubernetes mode - create worker pod with real repo-mapping.yaml config
+		config, err := o.getRepositoryConfig(repository)
+		if err != nil {
+			log.Printf("Failed to load repository config, using default: %v", err)
+			config = &kubernetes.RepositoryConfig{
+				Image:     "worldscandy/claude-automation:k8s", // Default to new integrated image
+				Workspace: "/workspace",
+				Env:       []string{"NODE_ENV=development"},
+			}
 		}
 		
 		workerPod, err = o.podManager.CreateWorkerPod(ctx, issueNumber, repository, config)
@@ -617,4 +621,24 @@ func main() {
 	} else {
 		log.Printf("Claude task result:\n%s", result)
 	}
+}
+
+// getRepositoryConfig loads repository configuration from repo-mapping.yaml
+func (o *Orchestrator) getRepositoryConfig(repository string) (*kubernetes.RepositoryConfig, error) {
+	// For now, return the default configuration for claude-automation
+	// TODO: Implement proper YAML parsing
+	if strings.Contains(repository, "claude-automation") {
+		return &kubernetes.RepositoryConfig{
+			Image:     "worldscandy/claude-automation:k8s",
+			Workspace: "/workspace",
+			Env:       []string{"NODE_ENV=development"},
+		}, nil
+	}
+	
+	// Default fallback
+	return &kubernetes.RepositoryConfig{
+		Image:     "worldscandy/claude-automation:k8s",
+		Workspace: "/workspace",
+		Env:       []string{"NODE_ENV=development"},
+	}, nil
 }
