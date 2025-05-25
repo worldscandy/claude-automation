@@ -311,11 +311,12 @@ func (pm *PodManager) buildPodSpec(podName string, issueNumber int, repository s
 			RestartPolicy:      corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
-					Name:    "claude-worker",
-					Image:   config.Image,
-					Env:     env,
-					Command: []string{"sh", "-c", "while true; do sleep 30; done"}, // Keep running
-					WorkingDir: config.Workspace,
+					Name:            "claude-worker",
+					Image:           config.Image,
+					ImagePullPolicy: corev1.PullNever, // Use local images
+					Env:             env,
+					Command:         []string{"sh", "-c", "while true; do sleep 30; done"}, // Keep running
+					WorkingDir:      config.Workspace,
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "workspace",
