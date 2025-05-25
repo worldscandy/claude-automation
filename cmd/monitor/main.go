@@ -31,9 +31,12 @@ type IssueRequest struct {
 }
 
 func NewIssueMonitor() (*IssueMonitor, error) {
-	// Load .env file
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found, using environment variables")
+	// Load .env-secret file (fallback to .env)
+	if err := godotenv.Load(".env-secret"); err != nil {
+		// Fallback to .env if .env-secret doesn't exist
+		if err := godotenv.Load(); err != nil {
+			log.Println("Warning: .env-secret and .env files not found, using environment variables")
+		}
 	}
 
 	// Get configuration from environment

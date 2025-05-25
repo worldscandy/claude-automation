@@ -1,1 +1,0 @@
-Test result from Claude CLI mock implementation

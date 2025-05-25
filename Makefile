@@ -1,4 +1,4 @@
-.PHONY: build test clean run-test k8s-build k8s-deploy k8s-clean monitor token-renewal auth-test
+.PHONY: build test clean run-test k8s-build k8s-deploy k8s-clean monitor token-renewal auth-test test-auth-k8s test-orchestrator integration-tests
 
 build:
 	@echo "Building orchestrator..."
@@ -59,7 +59,7 @@ token-renewal:
 
 auth-test:
 	@echo "Running authentication system tests..."
-	go run ./cmd/auth-test
+	go run ./test/integration/auth
 
 # Issue #13 - Claude CLI Kubernetes Integration
 claude-integration-test:
@@ -67,9 +67,17 @@ claude-integration-test:
 	@echo "Setting ORCHESTRATOR_MODE=kubernetes..."
 	ORCHESTRATOR_MODE=kubernetes go run ./cmd/orchestrator -issue 13 -task "Create a simple test file with Hello World content" -repo worldscandy/claude-automation
 
-claude-pod-test:
-	@echo "Testing direct Pod creation and Claude CLI execution..."
-	go run -tags integration ./cmd/integration-test
+# Integration Tests
+test-auth-k8s:
+	@echo "Running Kubernetes authentication integration tests..."
+	go run ./test/integration/auth-k8s
+
+test-orchestrator:
+	@echo "Running Orchestrator integration tests..."
+	go run ./test/integration/orchestrator
+
+integration-tests: auth-test test-auth-k8s test-orchestrator
+	@echo "All integration tests completed!"
 
 # Issue #13 Development Workflow  
 issue-13-dev: build

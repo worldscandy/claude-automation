@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -320,7 +319,11 @@ func (pm *PodManager) buildPodSpec(podName string, issueNumber int, repository s
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "workspace",
-							MountPath: config.Workspace,
+							MountPath: "/workspace",
+						},
+						{
+							Name:      "claude-temp",
+							MountPath: "/tmp/claude",
 						},
 						{
 							Name:      "claude-auth",
@@ -334,7 +337,17 @@ func (pm *PodManager) buildPodSpec(podName string, issueNumber int, repository s
 				{
 					Name: "workspace",
 					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							SizeLimit: &resource.Quantity{},
+						},
+					},
+				},
+				{
+					Name: "claude-temp",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							SizeLimit: &resource.Quantity{},
+						},
 					},
 				},
 				{

@@ -58,8 +58,11 @@ type TaskExecution struct {
 
 func NewOrchestrator() (*Orchestrator, error) {
 	// Load environment variables
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found, using environment variables")
+	if err := godotenv.Load(".env-secret"); err != nil {
+		// Fallback to .env if .env-secret doesn't exist
+		if err := godotenv.Load(); err != nil {
+			log.Println("Warning: .env-secret and .env files not found, using environment variables")
+		}
 	}
 
 	// GitHub client
@@ -83,13 +86,11 @@ func NewOrchestrator() (*Orchestrator, error) {
 		repo = "claude-automation"
 	}
 
-	// Workspace setup
-	workspaceRoot := filepath.Join(".", "workspaces")
-	os.MkdirAll(workspaceRoot, 0755)
+	// Workspace setup (Pod内完結型では不要、レガシー互換性のためのみ保持)
+	workspaceRoot := "/tmp/orchestrator-workspace" // ホスト依存を削除
 	
-	// Sessions setup
-	sessionsDir := filepath.Join(".", "sessions")
-	os.MkdirAll(sessionsDir, 0755)
+	// Sessions setup (Pod内完結型では不要、レガシー互換性のためのみ保持)  
+	sessionsDir := "/tmp/orchestrator-sessions" // ホスト依存を削除
 
 	// Container manager setup
 	containerMode := os.Getenv("CONTAINER_MANAGER_MODE") == "docker"
@@ -116,7 +117,7 @@ func NewOrchestrator() (*Orchestrator, error) {
 			namespace = "claude-automation"
 		}
 		
-		pm, err := kubernetes.NewPodManager(namespace, workspaceRoot, sessionsDir)
+		pm, err := kubernetes.NewPodManager(namespace, "/tmp/k8s-workspaces", "/tmp/k8s-sessions")
 		if err != nil {
 			log.Printf("Warning: Failed to create pod manager: %v", err)
 			kubernetesMode = false
@@ -345,9 +346,20 @@ func (o *Orchestrator) executeInContainer(ctx context.Context, execution *TaskEx
 	return output, nil
 }
 
-// executeInPod executes Claude CLI inside a Kubernetes worker pod
+// executeInPod executes Claude CLI inside a Kubernetes worker pod (Pod内完結型)
 func (o *Orchestrator) executeInPod(ctx context.Context, execution *TaskExecution) (string, error) {
 	podName := execution.WorkerPod.PodName
+	
+	// Pod内完結型: 固定パスを使用
+	workspaceDir := "/workspace"
+	sessionFile := fmt.Sprintf("/tmp/claude/session-%s.json", execution.IssueID)
+	taskFile := fmt.Sprintf("/tmp/claude/task-%s.txt", execution.IssueID)
+	
+	// Pod内でディレクトリ構造をセットアップ
+	setupCmd := fmt.Sprintf("mkdir -p %s && mkdir -p /tmp/claude && mkdir -p /app/auth", workspaceDir)
+	if _, err := o.podManager.ExecuteInPod(ctx, podName, setupCmd); err != nil {
+		return "", fmt.Errorf("failed to setup pod workspace: %w", err)
+	}
 	
 	// Prepare Claude CLI command for pod execution
 	claudeArgs := []string{
@@ -361,26 +373,20 @@ func (o *Orchestrator) executeInPod(ctx context.Context, execution *TaskExecutio
 		claudeArgs = append(claudeArgs, "--output-format", execution.OutputFormat)
 	}
 	
-	if execution.SessionFile != "" {
-		// Map session file to pod path
-		sessionPath := "/app/sessions/" + filepath.Base(execution.SessionFile)
-		claudeArgs = append(claudeArgs, "--continue", sessionPath)
-	}
+	// Session management (Pod内パス)
+	claudeArgs = append(claudeArgs, "--continue", sessionFile)
 
-	// Build task context
-	taskContext := o.buildTaskContext(execution)
+	// Build task context (Pod内完結型)
+	taskContext := o.buildPodTaskContext(execution, workspaceDir)
 	
-	// Create temporary file with task context in pod
-	tempFile := fmt.Sprintf("/tmp/claude-task-%s.txt", execution.IssueID)
-	createTaskFileCmd := fmt.Sprintf("echo %s > %s", 
-		strings.ReplaceAll(taskContext, `"`, `\"`), tempFile)
-	
+	// Create task file in pod using proper escaping
+	createTaskFileCmd := fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", taskFile, taskContext)
 	if _, err := o.podManager.ExecuteInPod(ctx, podName, createTaskFileCmd); err != nil {
 		return "", fmt.Errorf("failed to create task file in pod: %w", err)
 	}
 	
 	// Execute Claude CLI in pod with task file as input
-	claudeCmd := strings.Join(claudeArgs, " ") + " < " + tempFile
+	claudeCmd := fmt.Sprintf("cd %s && %s < %s", workspaceDir, strings.Join(claudeArgs, " "), taskFile)
 	output, err := o.podManager.ExecuteInPod(ctx, podName, claudeCmd)
 	if err != nil {
 		// Get pod logs for debugging
@@ -393,19 +399,19 @@ func (o *Orchestrator) executeInPod(ctx context.Context, execution *TaskExecutio
 		return "", fmt.Errorf("claude command failed in pod: %w\nOutput: %s", err, output)
 	}
 
-	// Cleanup temp file
-	cleanupCmd := "rm -f " + tempFile
+	// Cleanup temp files
+	cleanupCmd := fmt.Sprintf("rm -f %s", taskFile)
 	if _, err := o.podManager.ExecuteInPod(ctx, podName, cleanupCmd); err != nil {
 		log.Printf("Warning: failed to cleanup temp file: %v", err)
 	}
 
-	// Update session usage
+	// Update session usage (Pod内管理)
 	o.sessionManager.UpdateSessionUsage(execution.IssueID)
 	
 	return output, nil
 }
 
-// buildTaskContext creates comprehensive context for Claude CLI
+// buildTaskContext creates comprehensive context for Claude CLI (Legacy Host版)
 func (o *Orchestrator) buildTaskContext(execution *TaskExecution) string {
 	return fmt.Sprintf(`## GitHub Issue Automation Context
 
@@ -435,14 +441,54 @@ Begin processing this task autonomously. Use --continue if you need multiple con
 		filepath.Join(o.workspaceRoot, execution.IssueID))
 }
 
-// SessionManager methods
+// buildPodTaskContext creates comprehensive context for Claude CLI (Pod内完結型)
+func (o *Orchestrator) buildPodTaskContext(execution *TaskExecution, workspaceDir string) string {
+	return fmt.Sprintf(`## Kubernetes Pod GitHub Issue Automation Context
+
+You are Claude Code running inside a Kubernetes Pod, automating GitHub issue processing. 
+
+### 🎯 Task Details:
+- **Issue ID**: #%s
+- **Repository**: %s  
+- **Task**: %s
+
+### 🐳 Pod Environment:
+- **Workspace**: %s (Pod内固定パス)
+- **Session File**: /tmp/claude/session-%s.json
+- **Auth Files**: /app/auth/.claude.json, /app/auth/.claude/.credentials.json
+
+### 🛠️ Available Tools:
+- Read/Write/Edit files using Claude Code tools
+- TodoWrite/TodoRead for task management
+- Bash tool for command execution (Pod内)
+- All MCP tools are available
+
+### 📋 Instructions:
+1. Use TodoWrite to plan your approach
+2. Break down the task into manageable steps
+3. Execute each step using appropriate tools
+4. Work within the Pod's /workspace directory
+5. Provide clear progress updates
+6. Use session management for multi-turn conversations
+
+### ⚡ Pod Advantages:
+- Isolated execution environment
+- Pre-configured Claude CLI authentication  
+- Dedicated workspace and session management
+- Kubernetes native scalability
+
+Begin processing this task autonomously in the Pod environment. Use --continue for session continuity.`,
+		execution.IssueID,
+		execution.Repository,
+		execution.Task,
+		workspaceDir,
+		execution.IssueID)
+}
+
+// SessionManager methods (Pod内完結型対応)
 func (sm *SessionManager) CreateSession(issueID string) (string, error) {
-	sessionDir := filepath.Join(".", "sessions")
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create session directory: %w", err)
-	}
-	
-	sessionFile := filepath.Join(sessionDir, fmt.Sprintf("issue-%s.session", issueID))
+	// Pod内完結型: ホストファイルシステムに依存しない
+	sessionFile := fmt.Sprintf("/tmp/claude/session-%s.json", issueID)
 	
 	sessionInfo := SessionInfo{
 		SessionFile: sessionFile,
@@ -452,12 +498,8 @@ func (sm *SessionManager) CreateSession(issueID string) (string, error) {
 	
 	sm.sessions.Store(issueID, sessionInfo)
 	
-	// Create empty session file
-	if _, err := os.Create(sessionFile); err != nil {
-		return "", fmt.Errorf("failed to create session file: %w", err)
-	}
-	
-	log.Printf("Created session file for issue %s: %s", issueID, sessionFile)
+	// Pod内でセッションファイルは動的作成されるため、ここでは作成しない
+	log.Printf("Registered session for issue %s: %s (Pod内で動的作成)", issueID, sessionFile)
 	return sessionFile, nil
 }
 
