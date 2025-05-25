@@ -25,47 +25,17 @@ RUN chmod +x /app/scripts/token-renewal.sh
 RUN chown -R claude:claude /home/claude /app
 
 # Create a helpful welcome script
-RUN cat > /home/claude/README-TOKEN-RENEWAL.md << 'EOF'
-# 🔐 Claude CLI Token Renewal Guide
-
-This container is prepared for Claude CLI token renewal.
-
-## Steps to renew your token:
-
-1. **Run Claude Login**:
-   ```bash
-   claude login
-   ```
-
-2. **Follow the authentication flow**:
-   - A browser URL will be displayed
-   - Open the URL in your browser  
-   - Complete Claude Pro Max authentication
-   - Copy the authentication code from browser
-   - Paste the code back in the terminal
-
-3. **Extract token information**:
-   ```bash
-   /app/scripts/token-renewal.sh
-   ```
-
-4. **Update .env-secret on host**:
-   - Copy the output values
-   - Update your .env-secret file on the host system
-   - Restart the Container Orchestration system
-
-## Verification:
-```bash
-claude --version
-claude --print "Hello, test authentication"
-```
-
-## Files generated:
-- `~/.claude.json` - User profile and settings
-- `~/.claude/.credentials.json` - OAuth authentication token
-
-The helper script will extract the necessary values for your .env-secret file.
-EOF
+RUN echo '# 🔐 Claude CLI Token Renewal Guide' > /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo 'This container is prepared for Claude CLI token renewal.' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '## Steps to renew your token:' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '1. **Run Claude Login**: `claude login`' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '2. **Follow the authentication flow in browser**' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '3. **Extract token**: `/app/scripts/token-renewal.sh`' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '4. **Update .env-secret on host with the output**' >> /home/claude/README-TOKEN-RENEWAL.md && \
+    echo '5. **Restart Container Orchestration system**' >> /home/claude/README-TOKEN-RENEWAL.md
 
 # Set working directory
 WORKDIR /home/claude

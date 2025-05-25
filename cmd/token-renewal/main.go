@@ -1,13 +1,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
-	"syscall"
 	"time"
 )
 
@@ -59,29 +56,61 @@ func buildTokenRenewalContainer() error {
 }
 
 func runTokenRenewalContainer() error {
-	// Create context that can be cancelled with Ctrl+C
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle interrupt signals
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		fmt.Println("\n🛑 Interrupt received, stopping container...")
-		cancel()
-	}()
-
+	// Check if we're in an interactive terminal
+	isInteractive := isTerminalInteractive()
+	
 	// Generate unique container name
 	containerName := fmt.Sprintf("claude-token-renewal-%d", time.Now().Unix())
 
-	// Run interactive container
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-it", "--name", containerName, "claude-automation-token-renewal")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var args []string
+	if isInteractive {
+		// Run interactive container
+		args = []string{"run", "--rm", "-it", "--name", containerName, "claude-automation-token-renewal"}
+	} else {
+		// Run in non-interactive mode with helpful instructions
+		fmt.Println("⚠️  Non-interactive terminal detected.")
+		fmt.Println("   Starting container in background mode...")
+		fmt.Println()
+		fmt.Printf("🔗 To access the container interactively, run:\n")
+		fmt.Printf("   docker exec -it %s bash\n", containerName)
+		fmt.Println()
+		fmt.Println("📋 Inside the container:")
+		fmt.Println("   1. Run: claude login")
+		fmt.Println("   2. Run: /app/scripts/token-renewal.sh")
+		fmt.Println("   3. Copy the output to your .env-secret file")
+		fmt.Println("   4. Exit with: exit")
+		fmt.Println()
+		fmt.Printf("🛑 To stop the container: docker stop %s\n", containerName)
+		fmt.Println()
+		
+		args = []string{"run", "--rm", "-d", "--name", containerName, "claude-automation-token-renewal", "sleep", "3600"}
+	}
 
-	return cmd.Run()
+	// Run container
+	cmd := exec.Command("docker", args...)
+	if isInteractive {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	} else {
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to start container: %w\nOutput: %s", err, string(output))
+		}
+		fmt.Printf("✅ Container %s started successfully\n", containerName)
+		fmt.Printf("   Container ID: %s\n", string(output)[:12])
+		return nil
+	}
+}
+
+func isTerminalInteractive() bool {
+	// Check if stdin is a terminal
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
 }
 
 func displayInstructions() {
