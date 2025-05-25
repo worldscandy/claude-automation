@@ -1,16 +1,16 @@
 # Claude Automation System
 
-GitHub IssueでのClaude自動実行システム - @claudeメンションで自動タスク処理
+GitHub IssueでのClaude自動実行システム - @claude-codeメンションで自動タスク処理
 
 ## 🎯 概要
 
-このシステムは、GitHub Issueで`@claude`とメンションするだけで、自動的にClaude Code（Claude CLI）を起動してタスクを実行し、結果をIssueコメントで返信する自動化システムです。
+このシステムは、GitHub Issueで`@claude-code`とメンションするだけで、自動的にClaude Code（Claude CLI）を起動してタスクを実行し、結果をIssueコメントで返信する自動化システムです。
 
 ## ✨ 主要機能
 
 ### 🔍 GitHub Issue監視
 - **リアルタイム監視**: 30秒間隔でIssue/コメントをチェック
-- **スマートなメンション検知**: `@claude`を高精度で検出
+- **スマートなメンション検知**: `@claude-code`を高精度で検出
 - **自動タスク抽出**: Issue本文・コメントからタスク内容を解析
 
 ### 🤖 Claude CLI統合
@@ -31,7 +31,7 @@ GitHub IssueでのClaude自動実行システム - @claudeメンションで自�
 ```
 GitHub Issues → Monitor Pod → Worker Pod (Kubernetes) → Claude CLI → GitHub Comments
      ↓              ↓              ↓                    ↓           ↓
-  @claude      API Polling    Dynamic Pod          Real Claude    Auto Response
+  @claude-code      API Polling    Dynamic Pod          Real Claude    Auto Response
   mention      Detection      Creation             CLI Execution   System
 ```
 
@@ -144,10 +144,10 @@ minikube kubectl -- logs -f deployment/claude-automation-monitor
 
 ### 2. GitHub Issueでの使用
 
-任意のIssueまたはコメントで`@claude`とメンションし、実行したいタスクを記述：
+任意のIssueまたはコメントで`@claude-code`とメンションし、実行したいタスクを記述：
 
 ```markdown
-@claude 以下のタスクをお願いします：
+@claude-code 以下のタスクをお願いします：
 - シンプルなHello Worldプログラムを作成
 - テストファイルも含めて実装
 - READMEファイルで使用方法を説明
